@@ -11,6 +11,8 @@ Configuration via environment variables:
 - WHISPER_DEVICE: Device to use - cuda/cpu (default: auto-detect)
 - WHISPER_BATCH_SIZE: Batch size for transcription (default: 16)
 - WHISPER_LANGUAGE: Language code (default: de)
+- MODEL_IDLE_UNLOAD_SECONDS: Seconds of inactivity after which ModelManager
+  unloads models from VRAM again (default: 300)
 
 NOTE: For GPU support, you must set LD_LIBRARY_PATH before starting the server:
   export LD_LIBRARY_PATH=$(python -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0])")/lib:$LD_LIBRARY_PATH
@@ -53,6 +55,8 @@ if _thread_env_default is not None:
 
 import re
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from typing import List, Dict, Callable, Optional, Any
 
@@ -82,6 +86,7 @@ WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "de")
 WHISPER_CPU_THREADS = _configured_whisper_cpu_threads or 4
 TORCH_NUM_THREADS = _configured_torch_num_threads
 TORCH_NUM_INTEROP_THREADS = _optional_positive_int_env("TORCH_NUM_INTEROP_THREADS")
+MODEL_IDLE_UNLOAD_SECONDS = _optional_positive_int_env("MODEL_IDLE_UNLOAD_SECONDS") or 300
 
 
 def _configure_torch_threading(device: str) -> None:
@@ -238,6 +243,96 @@ def _cleanup_memory(device: str) -> None:
             logger.info("GPU memory cache cleared")
     except Exception as e:
         logger.warning(f"Failed to clear GPU cache: {e}")
+
+
+class ModelManager:
+    """
+    Lazily loads transcription models on first use and unloads them again
+    after a configurable idle period, so they don't permanently occupy VRAM
+    that other GPU consumers (e.g. the summarization LLM) also need.
+    """
+
+    def __init__(self, idle_unload_seconds: int = MODEL_IDLE_UNLOAD_SECONDS) -> None:
+        self._idle_unload_seconds = idle_unload_seconds
+        # Guards the fields below; held only briefly, never across a slow
+        # load_models()/cleanup call, so health checks and diagnostics (which
+        # only need current()/is_loaded) are never blocked by a load in
+        # progress.
+        self._lock = threading.Lock()
+        # Serializes the actual load_models() call so concurrent acquire()
+        # callers don't each trigger their own multi-minute load.
+        self._load_lock = threading.Lock()
+        self._models: TranscriptionModels | None = None
+        self._active_uses = 0
+        self._idle_since: float | None = None
+
+    @property
+    def is_loaded(self) -> bool:
+        with self._lock:
+            return self._models is not None
+
+    def current(self) -> TranscriptionModels | None:
+        """Return the currently resident models without loading them."""
+        with self._lock:
+            return self._models
+
+    def acquire(self) -> TranscriptionModels:
+        """
+        Return loaded models, loading them first if necessary.
+        Blocks the calling thread while loading - call from a worker
+        thread, never from the asyncio event loop.
+        """
+        with self._lock:
+            if self._models is not None:
+                self._active_uses += 1
+                self._idle_since = None
+                return self._models
+
+        with self._load_lock:
+            with self._lock:
+                if self._models is not None:
+                    self._active_uses += 1
+                    self._idle_since = None
+                    return self._models
+            models = load_models()
+            with self._lock:
+                self._models = models
+                self._active_uses += 1
+                self._idle_since = None
+                return self._models
+
+    def release(self) -> None:
+        """Mark one use as finished, starting the idle countdown once nothing else is using the models."""
+        with self._lock:
+            self._active_uses = max(0, self._active_uses - 1)
+            if self._active_uses == 0:
+                self._idle_since = time.monotonic()
+
+    def unload_if_idle(self) -> None:
+        """Unload models if nobody has used them for idle_unload_seconds. Call this periodically."""
+        with self._lock:
+            if self._models is None or self._active_uses > 0 or self._idle_since is None:
+                return
+            if time.monotonic() - self._idle_since < self._idle_unload_seconds:
+                return
+            device = self._models.device
+            self._models = None
+            self._idle_since = None
+        logger.info(
+            "Unloading transcription models after %ss idle to free VRAM",
+            self._idle_unload_seconds,
+        )
+        _cleanup_memory(device)
+
+    def shutdown(self) -> None:
+        """Unload models unconditionally, e.g. on server shutdown."""
+        with self._lock:
+            if self._models is None:
+                return
+            device = self._models.device
+            self._models = None
+            self._idle_since = None
+        _cleanup_memory(device)
 
 
 @dataclass

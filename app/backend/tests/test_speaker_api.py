@@ -425,17 +425,6 @@ def test_backfill_endpoint_copies_existing_job_embeddings_to_profiles(
         confidence=1.0,
         status="manual",
     )
-    main.app.state.models = object()
-    monkeypatch.setattr(
-        main,
-        "speaker_embedding_diagnostics",
-        lambda: main.SpeakerEmbeddingDiagnosticsResponse(
-            enabled=True,
-            loaded=True,
-            model_name="test-embedding",
-            profile_embedding_count=0,
-        ),
-    )
     client = TestClient(main.app)
 
     response = client.post("/api/speaker-embeddings/backfill?profile_id=alice")
@@ -644,19 +633,20 @@ def test_speaker_embedding_diagnostics_include_counts_and_session_quality(
             "excluded_overlap_count": 0,
         },
     )
+    fake_models = type(
+        "Models",
+        (),
+        {
+            "speaker_embedding_inference": object(),
+            "speaker_embedding_model_name": "test-embedding",
+            "speaker_embedding_attempted_models": ("test-embedding",),
+            "speaker_embedding_error": None,
+        },
+    )()
     monkeypatch.setattr(
         main.app.state,
-        "models",
-        type(
-            "Models",
-            (),
-            {
-                "speaker_embedding_inference": object(),
-                "speaker_embedding_model_name": "test-embedding",
-                "speaker_embedding_attempted_models": ("test-embedding",),
-                "speaker_embedding_error": None,
-            },
-        )(),
+        "model_manager",
+        type("FakeModelManager", (), {"current": lambda self: fake_models})(),
         raising=False,
     )
     client = TestClient(main.app)

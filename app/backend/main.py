@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import (
     FastAPI,
@@ -35,9 +35,9 @@ from pydantic import BaseModel, Field
 
 from transcribe import (
     transcribe_audio,
-    load_models,
     TranscriptionModels,
-    _cleanup_memory,
+    ModelManager,
+    MODEL_IDLE_UNLOAD_SECONDS,
 )
 from summarize import (
     LLMCallError,
@@ -121,11 +121,23 @@ class CancellationRequested(Exception):
     """Raised inside a transcription worker when a job has been cancelled."""
 
 
+async def _idle_model_unload_loop(model_manager: ModelManager) -> None:
+    """Periodically unload transcription models once they've been idle long enough."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            model_manager.unload_if_idle()
+        except Exception:
+            logger.exception("Error while checking idle transcription models")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     FastAPI lifespan event handler.
-    Loads all ML models at startup and cleans up on shutdown.
+    ML models are loaded lazily on first use (see ModelManager) rather than
+    at startup, so they don't occupy VRAM needed by other GPU consumers
+    (e.g. the summarization LLM) before a transcription actually runs.
     """
     logger.info("Server starting up - initializing persistence...")
 
@@ -140,25 +152,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize persistence: {e}", exc_info=True)
 
-    logger.info("Loading transcription models...")
-
-    try:
-        # Load models at startup (this takes several minutes)
-        app.state.models = load_models()
-        app.state.models_loaded = True
-        logger.info("Models loaded successfully - server ready")
-    except Exception as e:
-        logger.error(f"Failed to load models: {e}", exc_info=True)
-        app.state.models = None
-        app.state.models_loaded = False
+    app.state.model_manager = ModelManager(idle_unload_seconds=MODEL_IDLE_UNLOAD_SECONDS)
+    idle_unload_task = asyncio.create_task(
+        _idle_model_unload_loop(app.state.model_manager)
+    )
 
     app.state.job_manager = TranscriptionJobManager(
-        models_provider=lambda: getattr(app.state, "models", None),
+        model_manager=app.state.model_manager,
         concurrency_limit=TRANSCRIPTION_CONCURRENCY,
     )
     await app.state.job_manager.start()
     app.state.pipeline_manager = PipelineJobManager(
-        models_provider=lambda: getattr(app.state, "models", None),
+        model_manager=app.state.model_manager,
         concurrency_limit=PIPELINE_CONCURRENCY,
     )
     await app.state.pipeline_manager.start()
@@ -171,6 +176,8 @@ async def lifespan(app: FastAPI):
 
     # Cleanup on shutdown - properly release GPU resources
     logger.info("Server shutting down - cleaning up...")
+    idle_unload_task.cancel()
+    await asyncio.gather(idle_unload_task, return_exceptions=True)
     if hasattr(app.state, "pipeline_manager"):
         await app.state.pipeline_manager.stop()
     if hasattr(app.state, "summary_job_manager"):
@@ -178,12 +185,7 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "job_manager"):
         await app.state.job_manager.stop()
     mark_active_jobs_failed("Transkription wurde durch Backend-Shutdown unterbrochen")
-    if hasattr(app.state, "models") and app.state.models is not None:
-        device = app.state.models.device
-        del app.state.models
-        _cleanup_memory(device)
-    app.state.models = None
-    app.state.models_loaded = False
+    app.state.model_manager.shutdown()
 
 
 app = FastAPI(
@@ -459,10 +461,10 @@ class TranscriptionJobManager:
     def __init__(
         self,
         *,
-        models_provider: Callable[[], TranscriptionModels | None],
+        model_manager: ModelManager,
         concurrency_limit: int,
     ) -> None:
-        self.models_provider = models_provider
+        self.model_manager = model_manager
         self.concurrency_limit = max(1, concurrency_limit)
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.executor = ThreadPoolExecutor(
@@ -519,24 +521,12 @@ class TranscriptionJobManager:
                     cleanup_job_uploads(job_id, job)
                     continue
 
-                models = self.models_provider()
-                if models is None:
-                    update_job_state(
-                        job_id,
-                        status=JOB_STATUS_FAILED,
-                        progress=0,
-                        message="Modelle sind nicht geladen",
-                        error="Modelle sind nicht geladen",
-                    )
-                    continue
-
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     self.executor,
-                    run_transcription,
+                    self._run_transcription_job,
                     job_id,
                     job.get("file_path"),
-                    models,
                 )
             except asyncio.CancelledError:
                 raise
@@ -557,12 +547,36 @@ class TranscriptionJobManager:
             finally:
                 self.queue.task_done()
 
+    def _run_transcription_job(self, job_id: str, file_path: str) -> None:
+        """Runs on a worker thread: loads models on demand, then transcribes."""
+        try:
+            models = self.model_manager.acquire()
+        except Exception as e:
+            logger.error(
+                "Failed to load transcription models for job %s: %s",
+                job_id,
+                e,
+                exc_info=True,
+            )
+            update_job_state(
+                job_id,
+                status=JOB_STATUS_FAILED,
+                progress=0,
+                message=f"Modelle konnten nicht geladen werden: {e}",
+                error=str(e),
+            )
+            return
+        try:
+            run_transcription(job_id, file_path, models)
+        finally:
+            self.model_manager.release()
+
 
 async def get_or_create_job_manager() -> TranscriptionJobManager:
     manager = getattr(app.state, "job_manager", None)
     if manager is None:
         manager = TranscriptionJobManager(
-            models_provider=lambda: getattr(app.state, "models", None),
+            model_manager=app.state.model_manager,
             concurrency_limit=TRANSCRIPTION_CONCURRENCY,
         )
         app.state.job_manager = manager
@@ -622,10 +636,10 @@ class PipelineJobManager:
     def __init__(
         self,
         *,
-        models_provider: Callable[[], TranscriptionModels | None],
+        model_manager: ModelManager,
         concurrency_limit: int,
     ) -> None:
-        self.models_provider = models_provider
+        self.model_manager = model_manager
         self.concurrency_limit = max(1, concurrency_limit)
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.executor = ThreadPoolExecutor(
@@ -670,21 +684,11 @@ class PipelineJobManager:
                 job = load_pipeline_job(pipeline_id)
                 if not job or job.get("status") in TERMINAL_PIPELINE_STATUSES:
                     continue
-                models = self.models_provider()
-                if models is None:
-                    save_pipeline_state(
-                        pipeline_id,
-                        status=PIPELINE_STATUS_FAILED,
-                        error="Modelle sind nicht geladen",
-                        progress=0,
-                    )
-                    continue
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(
                     self.executor,
-                    run_pipeline_job,
+                    self._run_pipeline_job,
                     pipeline_id,
-                    models,
                 )
             except asyncio.CancelledError:
                 raise
@@ -704,12 +708,35 @@ class PipelineJobManager:
             finally:
                 self.queue.task_done()
 
+    def _run_pipeline_job(self, pipeline_id: str) -> None:
+        """Runs on a worker thread: loads models on demand, then runs the pipeline."""
+        try:
+            models = self.model_manager.acquire()
+        except Exception as e:
+            logger.error(
+                "Failed to load transcription models for pipeline %s: %s",
+                pipeline_id,
+                e,
+                exc_info=True,
+            )
+            save_pipeline_state(
+                pipeline_id,
+                status=PIPELINE_STATUS_FAILED,
+                error=f"Modelle konnten nicht geladen werden: {e}",
+                progress=0,
+            )
+            return
+        try:
+            run_pipeline_job(pipeline_id, models)
+        finally:
+            self.model_manager.release()
+
 
 async def get_or_create_pipeline_manager() -> PipelineJobManager:
     manager = getattr(app.state, "pipeline_manager", None)
     if manager is None:
         manager = PipelineJobManager(
-            models_provider=lambda: getattr(app.state, "models", None),
+            model_manager=app.state.model_manager,
             concurrency_limit=PIPELINE_CONCURRENCY,
         )
         app.state.pipeline_manager = manager
@@ -1859,13 +1886,13 @@ def backfill_speaker_profile_embeddings(
     profile_id: str | None = None,
     session_id: str | None = None,
 ) -> SpeakerEmbeddingBackfillResponse:
-    diagnostics = speaker_embedding_diagnostics()
-    if not diagnostics.loaded:
+    config = speaker_embedding_config_from_env()
+    if not config.enabled:
         raise HTTPException(
             status_code=409,
             detail={
                 "message": "Embedding-Modell nicht verfügbar",
-                "diagnostics": model_to_dict(diagnostics),
+                "diagnostics": model_to_dict(speaker_embedding_diagnostics()),
             },
         )
 
@@ -1876,41 +1903,52 @@ def backfill_speaker_profile_embeddings(
         and observation.get("profile_id")
         and (profile_id is None or observation.get("profile_id") == profile_id)
     ]
-    models = getattr(app.state, "models", None)
+    # Models are only loaded on demand - most observations already have
+    # embeddings persisted, so a backfill run often doesn't need them at all.
+    model_manager = getattr(app.state, "model_manager", None)
+    models: TranscriptionModels | None = None
     processed_jobs: set[str] = set()
     saved_count = 0
     skipped_count = 0
     errors: list[str] = []
 
-    for observation in observations:
-        job_id = observation["job_id"]
-        try:
-            if not load_job_speaker_embeddings(job_id) and job_id not in processed_jobs:
-                job = load_job(job_id)
-                if job is None:
-                    raise RuntimeError("Job nicht gefunden")
-                embeddings = extract_job_speaker_embeddings_from_transcript(
-                    job,
-                    models=models,
-                )
-                persist_job_speaker_embeddings(job_id, embeddings)
-                processed_jobs.add(job_id)
+    try:
+        for observation in observations:
+            job_id = observation["job_id"]
+            try:
+                if not load_job_speaker_embeddings(job_id) and job_id not in processed_jobs:
+                    job = load_job(job_id)
+                    if job is None:
+                        raise RuntimeError("Job nicht gefunden")
+                    if models is None:
+                        if model_manager is None:
+                            raise RuntimeError("Embedding-Modell nicht verfügbar")
+                        models = model_manager.acquire()
+                    embeddings = extract_job_speaker_embeddings_from_transcript(
+                        job,
+                        models=models,
+                    )
+                    persist_job_speaker_embeddings(job_id, embeddings)
+                    processed_jobs.add(job_id)
 
-            result = add_job_embedding_to_profile(
-                job_id=job_id,
-                local_speaker_id=observation["local_speaker_id"],
-                profile_id=observation["profile_id"],
-                observation_id=observation["observation_id"],
-                storage_reason="manual",
-            )
-            saved_count += int(result.get("saved_count") or 0)
-            if result.get("skipped_reason"):
+                result = add_job_embedding_to_profile(
+                    job_id=job_id,
+                    local_speaker_id=observation["local_speaker_id"],
+                    profile_id=observation["profile_id"],
+                    observation_id=observation["observation_id"],
+                    storage_reason="manual",
+                )
+                saved_count += int(result.get("saved_count") or 0)
+                if result.get("skipped_reason"):
+                    skipped_count += 1
+            except Exception as exc:
                 skipped_count += 1
-        except Exception as exc:
-            skipped_count += 1
-            errors.append(
-                f"{job_id}/{observation['local_speaker_id']}: {safe_exception_label(exc)}"
-            )
+                errors.append(
+                    f"{job_id}/{observation['local_speaker_id']}: {safe_exception_label(exc)}"
+                )
+    finally:
+        if models is not None:
+            model_manager.release()
 
     return SpeakerEmbeddingBackfillResponse(
         scanned_observation_count=len(observations),
@@ -1996,7 +2034,8 @@ def speaker_embedding_diagnostics(
     session_id: str | None = None,
 ) -> SpeakerEmbeddingDiagnosticsResponse:
     config = speaker_embedding_config_from_env()
-    models = getattr(app.state, "models", None)
+    model_manager = getattr(app.state, "model_manager", None)
+    models = model_manager.current() if model_manager is not None else None
     attempted = list(getattr(models, "speaker_embedding_attempted_models", ()) or ())
     model_name = getattr(models, "speaker_embedding_model_name", None)
     error = getattr(models, "speaker_embedding_error", None)
@@ -3320,15 +3359,13 @@ async def root():
 async def health_check():
     """
     Health check endpoint for Docker/Kubernetes.
-    Returns 200 only when models are loaded and server is ready.
+    Returns 200 once the server is up. Transcription models are loaded
+    lazily on first use, so `models_loaded` reports whether they currently
+    sit in memory rather than gating readiness.
     """
-    if not getattr(app.state, "models_loaded", False):
-        raise HTTPException(
-            status_code=503, detail="Models not loaded yet - server starting up"
-        )
     return {
         "status": "healthy",
-        "models_loaded": True,
+        "models_loaded": app.state.model_manager.is_loaded,
         "version": "0.1.0",
         "speaker_embeddings": model_to_dict(speaker_embedding_diagnostics()),
     }
@@ -3370,14 +3407,6 @@ async def start_pipeline(
     auto_detect_tops_from_pdf: bool = Form(False),
 ):
     """Start an unattended upload-to-review pipeline job."""
-    if (
-        not getattr(app.state, "models_loaded", False)
-        or getattr(app.state, "models", None) is None
-    ):
-        raise HTTPException(
-            status_code=503,
-            detail="Server startet noch - Modelle werden geladen. Bitte warten.",
-        )
     if not is_allowed_audio_file(audio.filename, audio.content_type):
         raise HTTPException(
             status_code=400,
@@ -4247,17 +4276,6 @@ async def start_transcription(
     Returns job_id to poll for status.
     """
     logger.info("Received transcription request (%s)", audio.content_type)
-
-    # Check if models are loaded
-    if (
-        not getattr(app.state, "models_loaded", False)
-        or getattr(app.state, "models", None) is None
-    ):
-        logger.error("Transcription request rejected - models not loaded")
-        raise HTTPException(
-            status_code=503,
-            detail="Server startet noch - Modelle werden geladen. Bitte warten.",
-        )
 
     # Validate file type
     if not is_allowed_audio_file(audio.filename, audio.content_type):

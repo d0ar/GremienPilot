@@ -1852,3 +1852,54 @@ def list_sessions(
 
     total = len(entries)
     return entries[offset : offset + limit], total
+
+
+def delete_session(
+    session_id: str,
+    db_path: Path | None = None,
+) -> dict[str, Any] | None:
+    """
+    Permanently delete a session and everything scoped to it (jobs, TOPs,
+    transcript, summaries, speaker observations). Returns the upload file
+    paths (audio/PDF) the caller should remove from disk, or None if the
+    session did not exist.
+
+    transcription_jobs.session_id and pipeline_jobs.session_id use
+    ON DELETE SET NULL, so those rows are deleted explicitly here instead
+    of relying on the sessions cascade, which would otherwise just orphan
+    them.
+    """
+    with connect(db_path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        exists = db.execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if exists is None:
+            return None
+
+        job_rows = db.execute(
+            "SELECT audio_path, file_path FROM transcription_jobs WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+        pipeline_rows = db.execute(
+            "SELECT result_refs_json FROM pipeline_jobs WHERE session_id = ?",
+            (session_id,),
+        ).fetchall()
+
+        upload_paths: set[str] = set()
+        for row in job_rows:
+            for path in (row["audio_path"], row["file_path"]):
+                if path:
+                    upload_paths.add(path)
+        for row in pipeline_rows:
+            refs = _from_json(row["result_refs_json"]) or {}
+            for key in ("audio_path", "pdf_path"):
+                path = refs.get(key)
+                if path:
+                    upload_paths.add(path)
+
+        db.execute("DELETE FROM transcription_jobs WHERE session_id = ?", (session_id,))
+        db.execute("DELETE FROM pipeline_jobs WHERE session_id = ?", (session_id,))
+        db.execute("DELETE FROM sessions WHERE session_id = ?", (session_id,))
+
+    return {"upload_paths": sorted(upload_paths)}

@@ -331,6 +331,19 @@ export async function listSessions(
 }
 
 /**
+ * Permanently delete a session, its transcription/pipeline jobs, and any
+ * uploaded audio file.
+ */
+export async function deleteSession(sessionId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/sessions/${sessionId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    throw await readApiError(response, "Sitzung konnte nicht gelöscht werden");
+  }
+}
+
+/**
  * Load a persisted editing session.
  */
 export async function loadSession(sessionId: string): Promise<SessionResponse> {

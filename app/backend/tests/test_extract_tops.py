@@ -61,6 +61,22 @@ def test_extract_tops_from_text_uses_openai_client_and_parses_response(fake_open
     assert "Einladung zur Sitzung" in request["messages"][1]["content"]
 
 
+def test_extract_tops_from_text_applies_num_ctx_but_never_think(
+    fake_openai_module, monkeypatch
+):
+    monkeypatch.setenv("LLM_NUM_CTX", "8192")
+    monkeypatch.setenv("LLM_THINK", "true")
+    fake_openai_module.content = "1. Haushalt"
+
+    extract_tops_from_text("Einladung zur Sitzung", model="test-model")
+
+    request = fake_openai_module.instances[0].calls[0]
+    # LLM_THINK must never reach this call - the "/no_think" system prompt
+    # is what actually keeps reasoning models from returning empty content,
+    # and a contradicting `think: true` request field would undermine that.
+    assert request["extra_body"] == {"options": {"num_ctx": 8192}}
+
+
 def test_build_extraction_system_prompt_does_not_duplicate_no_think():
     assert build_extraction_system_prompt("/no_think\nNur TOPs") == "/no_think\nNur TOPs"
 

@@ -108,6 +108,36 @@ def test_llm_invalid_boundaries_are_repaired(fake_openai_module):
     assert not request["messages"][0]["content"].startswith("/no_think")
 
 
+def test_llm_agenda_detection_passes_configured_num_ctx_and_think(
+    fake_openai_module, monkeypatch
+):
+    monkeypatch.setenv("LLM_NUM_CTX", "8192")
+    monkeypatch.setenv("LLM_THINK", "true")
+    fake_openai_module.content = """
+    {
+      "tops": [
+        {
+          "top_title": "Haushalt",
+          "start_index": 0,
+          "end_index": 1,
+          "confidence": 0.91,
+          "evidence_text": "Kommen wir zu TOP 1 Haushalt.",
+          "uncertain": false
+        }
+      ]
+    }
+    """
+    transcript = [
+        TranscriptUtterance("MOD", "Kommen wir zu TOP 1 Haushalt."),
+        TranscriptUtterance("A", "Der Haushalt wird beraten."),
+    ]
+
+    detect_agenda_from_transcript(transcript, model="test-model")
+
+    request = fake_openai_module.instances[0].calls[0]
+    assert request["extra_body"] == {"options": {"num_ctx": 8192}, "think": True}
+
+
 def test_llm_reasoning_field_is_used_when_content_is_empty(fake_openai_module):
     fake_openai_module.content = ""
     fake_openai_module.reasoning = """

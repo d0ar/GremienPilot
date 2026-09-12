@@ -13,6 +13,12 @@ Configuration via environment variables:
 - LLM_MAX_RETRIES: retry count for transient LLM errors (default: 2)
 - LLM_CHUNK_CHARS: target chunk size for long TOP transcripts (default: 12000)
 - LLM_STRUCTURED_FALLBACK: free-text fallback on structured failure (default: true)
+- LLM_NUM_CTX: context window size in tokens passed to Ollama (default: unset,
+  i.e. the model's own default). Ignored by non-Ollama backends.
+- LLM_THINK: enable/disable thinking mode on reasoning models via Ollama's
+  `think` option (true/false, or an effort level like "low"/"medium"/"high"
+  for models that support it). Default: unset, i.e. the model's own default.
+  Ignored by non-Ollama backends.
 """
 
 import json
@@ -42,6 +48,39 @@ LLM_STRUCTURED_FALLBACK = (
 
 def _is_truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_falsy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"0", "false", "no", "off"}
+
+
+def _parse_num_ctx(value: str | None) -> int | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _parse_think(value: str | None) -> bool | str | None:
+    """
+    Parse LLM_THINK. Accepts a boolean toggle, or (for models with graded
+    effort levels, e.g. gpt-oss) an arbitrary string like "low"/"medium"/
+    "high" passed straight through to the `think` request field.
+    """
+    if value is None or not value.strip():
+        return None
+    if _is_truthy(value):
+        return True
+    if _is_falsy(value):
+        return False
+    return value.strip()
+
+
+LLM_NUM_CTX = _parse_num_ctx(os.environ.get("LLM_NUM_CTX"))
+LLM_THINK = _parse_think(os.environ.get("LLM_THINK"))
 
 
 def is_docker_runtime() -> bool:
@@ -108,6 +147,8 @@ class LLMConfig:
     api_key: str
     timeout_seconds: float
     base_url_source: str
+    num_ctx: int | None = None
+    think: bool | str | None = None
 
     @property
     def uses_internal_ollama(self) -> bool:
@@ -147,7 +188,28 @@ def get_llm_config(model: str | None = None) -> LLMConfig:
         api_key=os.environ.get("LLM_API_KEY", LLM_API_KEY),
         timeout_seconds=float(os.environ.get("LLM_TIMEOUT_SECONDS", str(LLM_TIMEOUT_SECONDS))),
         base_url_source=source,
+        num_ctx=_parse_num_ctx(os.environ["LLM_NUM_CTX"]) if "LLM_NUM_CTX" in os.environ else LLM_NUM_CTX,
+        think=_parse_think(os.environ["LLM_THINK"]) if "LLM_THINK" in os.environ else LLM_THINK,
     )
+
+
+def build_llm_extra_body(config: LLMConfig, *, include_think: bool = True) -> dict[str, Any]:
+    """
+    Build extra JSON fields for Ollama-specific generation options
+    (context window size, thinking mode) to pass through via the OpenAI
+    client's `extra_body`. Only Ollama's OpenAI-compatible endpoint is known
+    to honor these; other backends should simply ignore unknown fields.
+
+    include_think=False lets callers that already manage thinking mode
+    themselves (e.g. via a "/no_think" system prompt directive) opt out, so
+    a globally configured LLM_THINK can't contradict that safeguard.
+    """
+    extra_body: dict[str, Any] = {}
+    if config.num_ctx is not None:
+        extra_body["options"] = {"num_ctx": config.num_ctx}
+    if include_think and config.think is not None:
+        extra_body["think"] = config.think
+    return extra_body
 
 
 @dataclass
@@ -568,22 +630,24 @@ def llm_diagnostics(model: str | None = None) -> LLMAvailability:
 def _chat_completion_content(
     client: Any,
     *,
-    model: str,
+    config: LLMConfig,
     messages: list[dict[str, str]],
     max_tokens: int,
     temperature: float,
 ) -> str:
+    extra_body = build_llm_extra_body(config)
     last_error: Exception | None = None
     last_info = LLMErrorInfo("unknown", False)
 
     for attempt in range(LLM_MAX_RETRIES + 1):
         try:
             response = client.chat.completions.create(
-                model=model,
+                model=config.model,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 timeout=LLM_TIMEOUT_SECONDS,
+                extra_body=extra_body or None,
             )
             content = response.choices[0].message.content or ""
             if not content.strip():
@@ -606,7 +670,7 @@ def _chat_completion_content(
     if last_info.category == "network":
         hint = (
             f" Prüfen Sie, ob der LLM-Dienst erreichbar ist "
-            f"(LLM_BASE_URL={get_llm_config(model).base_url})."
+            f"(LLM_BASE_URL={config.base_url})."
         )
     raise LLMCallError(
         f"LLM-Aufruf fehlgeschlagen ({last_info.category}): {last_error}.{hint}",
@@ -985,7 +1049,7 @@ def _summarize_structured(
     *,
     top_title: str,
     transcript_text: str,
-    model: str,
+    config: LLMConfig,
     system_prompt: str,
 ) -> tuple[StructuredSummary, int]:
     chunks = split_transcript_into_chunks(transcript_text)
@@ -995,7 +1059,7 @@ def _summarize_structured(
     if len(chunks) == 1:
         content = _chat_completion_content(
             client,
-            model=model,
+            config=config,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -1012,7 +1076,7 @@ def _summarize_structured(
     for chunk_index, chunk in enumerate(chunks):
         content = _chat_completion_content(
             client,
-            model=model,
+            config=config,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {
@@ -1032,7 +1096,7 @@ def _summarize_structured(
 
     content = _chat_completion_content(
         client,
-        model=model,
+        config=config,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": _reduce_user_prompt(top_title, partials)},
@@ -1075,7 +1139,7 @@ def _summarize_freetext(
     *,
     top_title: str,
     transcript_text: str,
-    model: str,
+    config: LLMConfig,
 ) -> tuple[str, int]:
     chunks = split_transcript_into_chunks(transcript_text)
     if not chunks:
@@ -1084,7 +1148,7 @@ def _summarize_freetext(
     if len(chunks) == 1:
         content = _chat_completion_content(
             client,
-            model=model,
+            config=config,
             messages=[
                 {"role": "system", "content": FREETEXT_SYSTEM_PROMPT},
                 {"role": "user", "content": _freetext_user_prompt(top_title, chunks[0])},
@@ -1099,7 +1163,7 @@ def _summarize_freetext(
         partials.append(
             _chat_completion_content(
                 client,
-                model=model,
+                config=config,
                 messages=[
                     {"role": "system", "content": FREETEXT_SYSTEM_PROMPT},
                     {
@@ -1114,7 +1178,7 @@ def _summarize_freetext(
 
     content = _chat_completion_content(
         client,
-        model=model,
+        config=config,
         messages=[
             {"role": "system", "content": FREETEXT_SYSTEM_PROMPT},
             {"role": "user", "content": _reduce_freetext_prompt(top_title, partials)},
@@ -1143,7 +1207,6 @@ def summarize_segment(
     config = get_llm_config(model)
     client = _load_openai_client(config)
     check_llm_availability(client=client, model=config.model)
-    actual_model = config.model
     actual_system_prompt = build_structured_system_prompt(system_prompt)
 
     start_time = time.time()
@@ -1152,7 +1215,7 @@ def summarize_segment(
             client,
             top_title=top_title,
             transcript_text=transcript_text,
-            model=actual_model,
+            config=config,
             system_prompt=actual_system_prompt,
         )
         summary = render_structured_summary(structured)
@@ -1178,7 +1241,7 @@ def summarize_segment(
         client,
         top_title=top_title,
         transcript_text=transcript_text,
-        model=actual_model,
+        config=config,
     )
     duration_seconds = time.time() - start_time
     return SummarizationResult(

@@ -24,7 +24,7 @@ from assignment_suggestions import (
     normalize_text,
     suggest_assignments,
 )
-from summarize import get_llm_config
+from summarize import build_llm_extra_body, get_llm_config
 
 
 logger = logging.getLogger(__name__)
@@ -378,6 +378,7 @@ def _detect_with_llm(
         ],
         temperature=0.1,
         max_tokens=2048,
+        extra_body=build_llm_extra_body(config) or None,
     )
     raw_response = _llm_message_text(response.choices[0].message)
     return _parse_llm_segments(raw_response)

@@ -18,7 +18,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
-from summarize import get_llm_config
+from summarize import build_llm_extra_body, get_llm_config
 
 logger = logging.getLogger(__name__)
 
@@ -397,6 +397,9 @@ TOPs:"""
             ],
             max_tokens=2048,
             temperature=0.1,  # Very low temperature for consistent extraction
+            # think intentionally excluded: the "/no_think" system prompt above
+            # already prevents empty-content responses from reasoning models.
+            extra_body=build_llm_extra_body(config, include_think=False) or None,
         )
 
         raw_response = response.choices[0].message.content or ""
@@ -627,6 +630,9 @@ JSON:"""
             ],
             max_tokens=3072,
             temperature=0.1,
+            # think intentionally excluded: the "/no_think" system prompt above
+            # already prevents empty-content responses from reasoning models.
+            extra_body=build_llm_extra_body(config, include_think=False) or None,
         )
 
         raw_response = response.choices[0].message.content or ""

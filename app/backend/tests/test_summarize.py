@@ -91,6 +91,43 @@ def test_summarize_segment_uses_structured_output_and_returns_duration(
     assert "Formal als JSON zusammenfassen" in request["messages"][0]["content"]
     assert "TOP: Haushalt" in request["messages"][1]["content"]
     assert "SPEAKER_00: Wir beraten den Haushalt." in request["messages"][1]["content"]
+    assert request["extra_body"] is None
+
+
+def test_summarize_segment_passes_num_ctx_and_think_when_configured(
+    fake_openai_module,
+    monkeypatch,
+):
+    monkeypatch.setenv("LLM_NUM_CTX", "8192")
+    monkeypatch.setenv("LLM_THINK", "false")
+    fake_openai_module.responses = [structured_response()]
+
+    summarize.summarize_segment(
+        "Haushalt",
+        "SPEAKER_00: Wir beraten den Haushalt.",
+        model="test-model",
+    )
+
+    request = fake_openai_module.instances[0].calls[0]
+    assert request["extra_body"] == {"options": {"num_ctx": 8192}, "think": False}
+
+
+def test_summarize_segment_passes_think_effort_level_through_unchanged(
+    fake_openai_module,
+    monkeypatch,
+):
+    monkeypatch.delenv("LLM_NUM_CTX", raising=False)
+    monkeypatch.setenv("LLM_THINK", "low")
+    fake_openai_module.responses = [structured_response()]
+
+    summarize.summarize_segment(
+        "Haushalt",
+        "SPEAKER_00: Wir beraten den Haushalt.",
+        model="test-model",
+    )
+
+    request = fake_openai_module.instances[0].calls[0]
+    assert request["extra_body"] == {"think": "low"}
 
 
 def test_summarize_segment_uses_map_reduce_for_long_transcripts(

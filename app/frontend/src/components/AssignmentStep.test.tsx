@@ -266,6 +266,41 @@ describe('AssignmentStep', () => {
     expect(setAssignments).toHaveBeenCalledWith([0, 1]);
   });
 
+  it('disables the undo button when there is no assignment history yet', () => {
+    renderAssignmentStep();
+
+    expect(screen.getByRole('button', { name: /^rückgängig/i })).toBeDisabled();
+  });
+
+  it('undoes the last bulk assignment change', async () => {
+    const user = userEvent.setup();
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ assignments: [0, 1], setAssignments });
+
+    // Select the first line, then shift-click the second to bulk-assign both
+    // to the currently selected TOP - the scenario that previously had no
+    // way back once it overwrote a good per-line distribution.
+    fireEvent.click(screen.getByText('Hallo zusammen'));
+    fireEvent.click(screen.getByText('Wir beraten den Haushalt'), { shiftKey: true });
+
+    const undoButton = screen.getByRole('button', { name: /^rückgängig/i });
+    expect(undoButton).toBeEnabled();
+
+    await user.click(undoButton);
+
+    expect(setAssignments).toHaveBeenLastCalledWith([0, 1]);
+  });
+
+  it('undoes the last bulk assignment change via Strg+Z', () => {
+    const setAssignments = vi.fn();
+    renderAssignmentStep({ assignments: [0, 1], setAssignments });
+
+    fireEvent.click(screen.getByText('Hallo zusammen'));
+    fireEvent.keyDown(window, { key: 'z', ctrlKey: true });
+
+    expect(setAssignments).toHaveBeenLastCalledWith([0, 1]);
+  });
+
   it('renames, adds, deletes and merges TOPs while preserving manual correction', async () => {
     const user = userEvent.setup();
     const setTops = vi.fn();

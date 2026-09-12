@@ -27,6 +27,9 @@ const topColors: TopColor[] = [
   { bg: 'bg-orange-100', border: 'border-orange-300', text: 'text-orange-700', dot: 'bg-orange-500' },
 ];
 
+// How many past assignment states to keep for the "Rückgängig" undo button.
+const MAX_ASSIGNMENT_HISTORY = 20;
+
 export default function AssignmentStep({
   onNext,
   onBack,
@@ -54,6 +57,7 @@ export default function AssignmentStep({
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [topTitleDraft, setTopTitleDraft] = useState(tops[0] ?? '');
+  const [assignmentHistory, setAssignmentHistory] = useState<(number | null)[][]>([]);
 
   const stableTopIds = tops.map((_, index) => topIds[index] ?? `top-${index}`);
   const updateTops = (nextTops: string[], nextTopIds = stableTopIds) => {
@@ -110,6 +114,47 @@ export default function AssignmentStep({
 
   const counts = getAssignmentCounts();
 
+  // Apply a new assignments array while remembering the previous one, so an
+  // accidental bulk re-assignment (e.g. a wide shift-click) can be undone.
+  // Only used for pure assignment changes - actions that also restructure
+  // the transcript or TOP list clear the history instead (see
+  // clearAssignmentHistory) since a stale snapshot could then reference
+  // lines/TOPs that no longer exist.
+  const applyAssignments = (next: (number | null)[]) => {
+    setAssignmentHistory((history) => [
+      ...history.slice(-(MAX_ASSIGNMENT_HISTORY - 1)),
+      assignments,
+    ]);
+    setAssignments(next);
+  };
+
+  const clearAssignmentHistory = () => setAssignmentHistory([]);
+
+  const undoLastAssignmentChange = () => {
+    if (assignmentHistory.length === 0) return;
+    const previous = assignmentHistory[assignmentHistory.length - 1];
+    setAssignmentHistory((history) => history.slice(0, -1));
+    if (previous && previous.length === assignments.length) {
+      setAssignments(previous);
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const isUndoShortcut =
+        (event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'z';
+      if (!isUndoShortcut || editingLine !== null) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+        return;
+      }
+      event.preventDefault();
+      undoLastAssignmentChange();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [assignmentHistory, assignments, editingLine]);
+
   const handleLineClick = (lineIndex: number, event: MouseEvent<HTMLDivElement>) => {
     if (editingLine === lineIndex) {
       return;
@@ -131,7 +176,7 @@ export default function AssignmentStep({
       for (let i = start; i <= end; i++) {
         newAssignments[i] = selectedTop;
       }
-      setAssignments(newAssignments);
+      applyAssignments(newAssignments);
       setSelectionStart(null);
     } else {
       // Single click - toggle or set
@@ -141,7 +186,7 @@ export default function AssignmentStep({
       } else {
         newAssignments[lineIndex] = selectedTop;
       }
-      setAssignments(newAssignments);
+      applyAssignments(newAssignments);
       setSelectionStart(lineIndex);
     }
   };
@@ -153,7 +198,7 @@ export default function AssignmentStep({
         newAssignments[i] = segment.top_index;
       }
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
     setSelectedTop(segment.top_index);
     setSelectedLineIndex(segment.start_index);
   };
@@ -173,14 +218,14 @@ export default function AssignmentStep({
           }
         }
       });
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const applyAllSuggestions = () => {
     if (!agendaDetection) {
       return;
     }
-    setAssignments(agendaDetection.assignments);
+    applyAssignments(agendaDetection.assignments);
   };
 
   const renameSelectedTop = () => {
@@ -205,6 +250,7 @@ export default function AssignmentStep({
     });
     updateTops(newTops, newTopIds);
     setAssignments(newAssignments);
+    clearAssignmentHistory();
     setSelectedTop(insertionIndex);
     setTopTitleDraft(newTops[insertionIndex] ?? '');
   };
@@ -222,6 +268,7 @@ export default function AssignmentStep({
     });
     updateTops(newTops, newTopIds);
     setAssignments(newAssignments);
+    clearAssignmentHistory();
     setSelectedTop(Math.max(0, Math.min(selectedTop, newTops.length - 1)));
   };
 
@@ -242,6 +289,7 @@ export default function AssignmentStep({
     });
     updateTops(newTops, newTopIds);
     setAssignments(newAssignments);
+    clearAssignmentHistory();
     setSelectedTop(selectedTop - 1);
   };
 
@@ -269,7 +317,7 @@ export default function AssignmentStep({
     for (let i = start; i <= end; i++) {
       newAssignments[i] = selectedTop;
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const splitCurrentSegmentAtSelectedLine = () => {
@@ -281,7 +329,7 @@ export default function AssignmentStep({
     for (let i = selectedLineIndex; i <= end; i++) {
       newAssignments[i] = selectedTop;
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const mergeCurrentSegmentWithPrevious = () => {
@@ -297,7 +345,7 @@ export default function AssignmentStep({
     for (let i = start; i <= end; i++) {
       newAssignments[i] = previousAssignment;
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const mergeCurrentSegmentWithNext = () => {
@@ -313,7 +361,7 @@ export default function AssignmentStep({
     for (let i = start; i <= end; i++) {
       newAssignments[i] = nextAssignment;
     }
-    setAssignments(newAssignments);
+    applyAssignments(newAssignments);
   };
 
   const startLineEdit = (lineIndex: number, text: string) => {
@@ -363,6 +411,7 @@ export default function AssignmentStep({
         ...replacementLines.map(() => currentAssignment),
         ...assignments.slice(editingLine + 1),
       ]);
+      clearAssignmentHistory();
       onTranscriptStructureChange?.();
     }
 
@@ -403,6 +452,7 @@ export default function AssignmentStep({
       ...assignments.slice(0, selectedLineIndex),
       ...assignments.slice(selectedLineIndex + 1),
     ]);
+    clearAssignmentHistory();
     setSelectedLineIndex(selectedLineIndex - 1);
     onTranscriptStructureChange?.();
   };
@@ -434,6 +484,7 @@ export default function AssignmentStep({
       ...assignments.slice(0, selectedLineIndex + 1),
       ...assignments.slice(selectedLineIndex + 2),
     ]);
+    clearAssignmentHistory();
     onTranscriptStructureChange?.();
   };
 
@@ -478,6 +529,7 @@ export default function AssignmentStep({
 
     setTranscript(mergedTranscript);
     setAssignments(mergedAssignments);
+    clearAssignmentHistory();
     setSelectedLineIndex(null);
     setSelectionStart(null);
     setEditingLine(null);
@@ -691,6 +743,16 @@ export default function AssignmentStep({
 
       <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 flex flex-wrap items-center gap-2 text-sm">
         <span className="mr-1 font-medium text-gray-900">Erweiterte Korrektur</span>
+        <button
+          type="button"
+          onClick={undoLastAssignmentChange}
+          disabled={assignmentHistory.length === 0}
+          title="Letzte TOP-Zuordnungsänderung rückgängig machen (Strg+Z)"
+          className="px-3 py-1.5 bg-amber-100 border border-amber-300 text-amber-900 rounded hover:bg-amber-200 disabled:opacity-50 disabled:bg-white disabled:text-gray-400 disabled:border-gray-300"
+        >
+          Rückgängig{assignmentHistory.length > 0 ? ` (${assignmentHistory.length})` : ''}
+        </button>
+        <span className="w-px h-6 bg-gray-300 mx-1" />
         <span className="text-gray-700">
           {selectedLineIndex === null
             ? 'Keine Zeile ausgewählt'

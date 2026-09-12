@@ -65,6 +65,7 @@ from persistence import (
     count_job_speaker_embeddings,
     count_speaker_embeddings,
     create_speaker_profile,
+    delete_session,
     delete_speaker_embeddings,
     delete_speaker_embeddings_for_source,
     init_db,
@@ -3637,6 +3638,44 @@ async def get_session(session_id: str):
     if session is None:
         raise HTTPException(status_code=404, detail="Session nicht gefunden")
     return build_session_response(session)
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session_endpoint(session_id: str):
+    """Permanently delete a session, its jobs, and their uploaded files."""
+    session = get_required_session(session_id)
+
+    job = load_job(session["job_id"]) if session.get("job_id") else None
+    pipeline_job = load_latest_pipeline_job_for_session(session_id)
+    if (
+        job and job.get("status") in {JOB_STATUS_PENDING, JOB_STATUS_PROCESSING}
+    ) or (
+        pipeline_job
+        and pipeline_job.get("status")
+        in {PIPELINE_STATUS_PENDING, PIPELINE_STATUS_PROCESSING}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Sitzung wird noch verarbeitet. Bitte zuerst abbrechen.",
+        )
+
+    result = delete_session(session_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Session nicht gefunden")
+
+    for upload_path in result["upload_paths"]:
+        remove_upload_file(upload_path)
+
+    with JOB_LOCK:
+        stale_job_ids = [
+            job_id
+            for job_id, cached_job in jobs.items()
+            if cached_job.get("session_id") == session_id
+        ]
+        for job_id in stale_job_ids:
+            del jobs[job_id]
+
+    return {"session_id": session_id, "deleted": True}
 
 
 @app.post(

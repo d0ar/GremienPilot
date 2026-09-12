@@ -30,10 +30,11 @@ fake_transcribe.transcribe_audio = lambda file_path, models, progress_callback=N
 
 
 class FakeModelManager:
-    """Minimal stand-in for transcribe.ModelManager - no real loading/idle-unload."""
+    """Minimal stand-in for transcribe.ModelManager - loads on demand, unloads once nothing uses it."""
 
-    def __init__(self, idle_unload_seconds: int = 300) -> None:
+    def __init__(self) -> None:
         self._models = None
+        self._active_uses = 0
 
     @property
     def is_loaded(self) -> bool:
@@ -45,20 +46,19 @@ class FakeModelManager:
     def acquire(self):
         if self._models is None:
             self._models = fake_transcribe.load_models()
+        self._active_uses += 1
         return self._models
 
     def release(self) -> None:
-        pass
-
-    def unload_if_idle(self) -> None:
-        pass
+        self._active_uses = max(0, self._active_uses - 1)
+        if self._active_uses == 0:
+            self._models = None
 
     def shutdown(self) -> None:
         self._models = None
 
 
 fake_transcribe.ModelManager = FakeModelManager
-fake_transcribe.MODEL_IDLE_UNLOAD_SECONDS = 300
 
 sys.modules.setdefault("transcribe", fake_transcribe)
 

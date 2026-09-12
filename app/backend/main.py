@@ -37,7 +37,6 @@ from transcribe import (
     transcribe_audio,
     TranscriptionModels,
     ModelManager,
-    MODEL_IDLE_UNLOAD_SECONDS,
 )
 from summarize import (
     LLMCallError,
@@ -122,23 +121,14 @@ class CancellationRequested(Exception):
     """Raised inside a transcription worker when a job has been cancelled."""
 
 
-async def _idle_model_unload_loop(model_manager: ModelManager) -> None:
-    """Periodically unload transcription models once they've been idle long enough."""
-    while True:
-        await asyncio.sleep(30)
-        try:
-            model_manager.unload_if_idle()
-        except Exception:
-            logger.exception("Error while checking idle transcription models")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
     FastAPI lifespan event handler.
-    ML models are loaded lazily on first use (see ModelManager) rather than
-    at startup, so they don't occupy VRAM needed by other GPU consumers
-    (e.g. the summarization LLM) before a transcription actually runs.
+    ML models are loaded lazily on first use and unloaded again immediately
+    afterwards (see ModelManager), so they only occupy VRAM while a
+    transcription/pipeline job actually needs them and don't compete with
+    other GPU consumers (e.g. the summarization LLM) the rest of the time.
     """
     logger.info("Server starting up - initializing persistence...")
 
@@ -153,10 +143,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to initialize persistence: {e}", exc_info=True)
 
-    app.state.model_manager = ModelManager(idle_unload_seconds=MODEL_IDLE_UNLOAD_SECONDS)
-    idle_unload_task = asyncio.create_task(
-        _idle_model_unload_loop(app.state.model_manager)
-    )
+    app.state.model_manager = ModelManager()
 
     app.state.job_manager = TranscriptionJobManager(
         model_manager=app.state.model_manager,
@@ -177,8 +164,6 @@ async def lifespan(app: FastAPI):
 
     # Cleanup on shutdown - properly release GPU resources
     logger.info("Server shutting down - cleaning up...")
-    idle_unload_task.cancel()
-    await asyncio.gather(idle_unload_task, return_exceptions=True)
     if hasattr(app.state, "pipeline_manager"):
         await app.state.pipeline_manager.stop()
     if hasattr(app.state, "summary_job_manager"):

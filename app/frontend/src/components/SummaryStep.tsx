@@ -61,7 +61,7 @@ export default function SummaryStep({
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportingFormat, setExportingFormat] = useState<ExportFormat | null>(null);
   const [acceptedSummaryWarnings, setAcceptedSummaryWarnings] = useState(false);
-  const [regenerationCandidate, setRegenerationCandidate] = useState<number | null>(null);
+  const [regenerationCandidate, setRegenerationCandidate] = useState<number[] | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const transcriptLineRefs = useRef<Array<HTMLDivElement | null>>([]);
 
@@ -270,12 +270,34 @@ export default function SummaryStep({
     hasStructuredItems ||
     Boolean(summaries[selectedSummaryIndex]);
 
+  // TOPs whose summary no longer matches its input, so regenerating them is
+  // what the yellow "changed" banner is actually asking the user to do.
+  const regenerableIndices = (hasTops ? tops.map((_, index) => index) : [0]).filter((index) =>
+    ['review_required', 'missing', 'failed'].includes(summaryStates[index]?.status ?? '')
+  );
+  const regenerationDisabledHint = isGenerating
+    ? 'Es läuft bereits eine Neugenerierung. Warten Sie, bis der Job abgeschlossen ist, oder brechen Sie ihn ab.'
+    : undefined;
+
   return (
     <div className="space-y-6">
       {!summariesAreFresh && (
-        <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900">
-          Änderungen betreffen einzelne TOPs. Die vorhandenen Zusammenfassungen bleiben sichtbar.
-          Prüfen Sie die gelb markierten TOPs und übernehmen, bearbeiten oder regenerieren Sie nur diese.
+        <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-900">
+          <div className="max-w-3xl">
+            Änderungen betreffen einzelne TOPs. Die vorhandenen Zusammenfassungen bleiben sichtbar.
+            Prüfen Sie die gelb markierten TOPs und übernehmen, bearbeiten oder regenerieren Sie nur diese.
+          </div>
+          {regenerableIndices.length > 1 && (
+            <button
+              type="button"
+              onClick={() => setRegenerationCandidate(regenerableIndices)}
+              disabled={isGenerating}
+              title={regenerationDisabledHint}
+              className="shrink-0 rounded border border-yellow-400 bg-white px-3 py-1.5 text-sm font-medium text-yellow-900 hover:bg-yellow-100 disabled:opacity-50"
+            >
+              Alle {regenerableIndices.length} geänderten neu generieren
+            </button>
+          )}
         </div>
       )}
 
@@ -479,8 +501,9 @@ export default function SummaryStep({
                       </button>
                     )}
                     <button
-                      onClick={() => setRegenerationCandidate(selectedSummaryIndex)}
+                      onClick={() => setRegenerationCandidate([selectedSummaryIndex])}
                       disabled={isGenerating}
+                      title={regenerationDisabledHint}
                       className="rounded border border-blue-300 px-3 py-1.5 text-sm font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"
                     >
                       Neu generieren
@@ -672,12 +695,18 @@ export default function SummaryStep({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="regeneration-title">
           <div className="max-w-lg rounded-xl bg-white p-6 shadow-xl">
             <h3 id="regeneration-title" className="text-lg font-semibold text-gray-950">
-              TOP-Zusammenfassung wirklich neu generieren?
+              {regenerationCandidate.length > 1
+                ? `${regenerationCandidate.length} TOP-Zusammenfassungen wirklich neu generieren?`
+                : 'TOP-Zusammenfassung wirklich neu generieren?'}
             </h3>
             <p className="mt-3 text-sm text-gray-700">
-              Es wird ausschließlich {hasTops ? `TOP ${regenerationCandidate + 1}` : 'das Gesamtgespräch'} verarbeitet.
+              Es {regenerationCandidate.length > 1 ? 'werden' : 'wird'} ausschließlich{' '}
+              {hasTops
+                ? regenerationCandidate.map((index) => `TOP ${index + 1}`).join(', ')
+                : 'das Gesamtgespräch'}{' '}
+              verarbeitet.
               Im CPU-Modus kann dies mehrere Stunden dauern und erhebliche Serverleistung beanspruchen.
-              Prüfen Sie vorher, ob die vorhandene Zusammenfassung nicht bereits ausreicht.
+              Prüfen Sie vorher, ob die vorhandenen Zusammenfassungen nicht bereits ausreichen.
             </p>
             <p className="mt-2 text-sm text-gray-600">
               Der Job läuft serverseitig weiter. Sie können die Seite verlassen und später zurückkehren.
@@ -689,9 +718,9 @@ export default function SummaryStep({
               <button
                 type="button"
                 onClick={async () => {
-                  const index = regenerationCandidate;
+                  const indices = regenerationCandidate;
                   setRegenerationCandidate(null);
-                  await onRegenerateSummary(index);
+                  await onRegenerateSummary(indices);
                 }}
                 className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700"
               >

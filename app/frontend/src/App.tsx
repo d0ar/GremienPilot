@@ -1199,8 +1199,8 @@ export default function App() {
     setCurrentStep(2);
   };
 
-  const handleRegenerateSummary = async (topIndex: number) => {
-    if (!sessionId) return;
+  const handleRegenerateSummary = async (topIndices: number[]) => {
+    if (!sessionId || topIndices.length === 0) return;
     setIsGeneratingSummary(true);
     try {
       if (saveTimerRef.current !== null) {
@@ -1216,13 +1216,17 @@ export default function App() {
       const revision = persisted.revision ?? sessionRevisionRef.current;
       sessionRevisionRef.current = revision;
       setSessionRevision(revision);
-      setSummaryStates(normalizeSummaryStates(persisted.summary_states));
-      const topId = normalizeSummaryStates(persisted.summary_states)[topIndex]?.top_id
-        ?? (persisted.top_ids ?? topIds)[topIndex]
-        ?? `whole-session:${sessionId}`;
+      const persistedStates = normalizeSummaryStates(persisted.summary_states);
+      setSummaryStates(persistedStates);
+      const selectedTopIds = topIndices.map(
+        (topIndex) =>
+          persistedStates[topIndex]?.top_id
+          ?? (persisted.top_ids ?? topIds)[topIndex]
+          ?? `whole-session:${sessionId}`
+      );
       const started = await startSummaryJob(sessionId, {
         revision,
-        topIds: [topId],
+        topIds: selectedTopIds,
         model: llmSettings.model,
         systemPrompt: tops.filter((top) => top.trim()).length === 0
           ? GENERIC_SUMMARY_PROMPT

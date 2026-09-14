@@ -313,6 +313,38 @@ describe('SummaryStep', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent(/mehrere Stunden/i);
 
     await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
-    expect(onRegenerateSummary).toHaveBeenCalledWith(0);
+    expect(onRegenerateSummary).toHaveBeenCalledWith([0]);
+  });
+
+  it('regenerates every changed TOP in a single job', async () => {
+    const user = userEvent.setup();
+    const onRegenerateSummary = vi.fn().mockResolvedValue(undefined);
+    renderSummaryStep({
+      onRegenerateSummary,
+      summaryStates: {
+        0: { top_id: 'top-0', status: 'review_required' },
+        1: { top_id: 'top-1', status: 'review_required' },
+      },
+      summariesAreFresh: false,
+    });
+
+    await user.click(screen.getByRole('button', { name: /alle 2 geänderten neu generieren/i }));
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+
+    expect(onRegenerateSummary).toHaveBeenCalledWith([0, 1]);
+  });
+
+  it('explains why regeneration is unavailable while a job is running', () => {
+    renderSummaryStep({
+      isGenerating: true,
+      summaryStates: {
+        0: { top_id: 'top-0', status: 'review_required' },
+      },
+      summariesAreFresh: false,
+    });
+
+    const regenerateButton = screen.getByRole('button', { name: /^neu generieren$/i });
+    expect(regenerateButton).toBeDisabled();
+    expect(regenerateButton).toHaveAttribute('title', expect.stringMatching(/läuft bereits/i));
   });
 });

@@ -435,7 +435,7 @@ export interface SummaryStepProps {
   setSummaries: (summaries: Record<number, string>) => void;
   summaryReviews?: Record<number, SummaryReview>;
   summaryStates?: Record<number, SummaryState>;
-  onRegenerateSummary: (topIndex: number) => Promise<void>;
+  onRegenerateSummary: (topIndices: number[]) => Promise<void>;
   onAcceptSummary: (topIndex: number) => Promise<void>;
   summaryJob?: SummaryJob | null;
   onCancelSummaryJob?: () => Promise<void>;

@@ -16,7 +16,17 @@ import {
   saveSession,
   startPipeline,
 } from './api';
-import type { PipelineJob, PipelineResultResponse } from './types';
+import type { PipelineJob, PipelineResultResponse, SummaryJob } from './types';
+
+const runningSummaryJob: SummaryJob = {
+  summary_job_id: 'summary-job-1',
+  session_id: 'session-1',
+  status: 'processing',
+  progress: 10,
+  current_top: 1,
+  total_tops: 1,
+  top_ids: ['top-1'],
+};
 
 vi.mock('./api', () => ({
   checkBackendHealth: vi.fn(),
@@ -263,6 +273,45 @@ describe('App pipeline flow', () => {
 
     expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
     expect(startSummaryJob).not.toHaveBeenCalled();
+  });
+
+  it('re-enables regeneration once the summary job has finished', async () => {
+    const user = userEvent.setup();
+    await uploadAndStart();
+    expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
+
+    // Finish the job only after React has rendered the running state, and
+    // resolve the follow-up session reload on a macrotask like a real request
+    // does. Reaching a terminal status clears the active job id and tears the
+    // polling effect down, which used to discard the completion handling and
+    // leave regeneration disabled until a full page reload.
+    let finishJob: (job: SummaryJob) => void = () => {};
+    vi.mocked(pollSummaryJob).mockImplementation(
+      (_jobId, onStatus) =>
+        new Promise<SummaryJob>((resolve) => {
+          onStatus?.({ ...runningSummaryJob });
+          finishJob = resolve;
+        })
+    );
+    vi.mocked(loadSession).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve(pipelineResult().session), 0);
+        })
+    );
+
+    await user.click(screen.getByRole('button', { name: /^neu generieren$/i }));
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^neu generieren$/i })).toBeDisabled();
+    });
+
+    finishJob({ ...runningSummaryJob, status: 'completed', progress: 100, current_top: 1 });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^neu generieren$/i })).toBeEnabled();
+    });
   });
 
   it('sets agenda detection from the pipeline result', async () => {

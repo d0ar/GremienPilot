@@ -362,8 +362,17 @@ export default function App() {
   const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
   const [summaryStates, setSummaryStates] = useState<Record<number, SummaryState>>({});
   const [exportMetadata, setExportMetadata] = useState<ExportMetadata>(DEFAULT_EXPORT_METADATA);
-  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+  const [isStartingSummaryJob, setIsStartingSummaryJob] = useState(false);
   const [summaryJob, setSummaryJob] = useState<SummaryJob | null>(null);
+  const activeSummaryJobId =
+    summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status)
+      ? summaryJob.summary_job_id
+      : null;
+  // Derived rather than stored: a stored flag stays stuck at true whenever the
+  // polling effect is torn down before it can reset it, which leaves every
+  // regeneration button disabled until a full page reload. Deriving it from the
+  // job status means a finished job always re-enables them.
+  const isGeneratingSummary = isStartingSummaryJob || activeSummaryJobId !== null;
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [skippedAssignment, setSkippedAssignment] = useState(false);
@@ -392,6 +401,7 @@ export default function App() {
   const activeSessionIdRef = useRef<string | null>(null);
   const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const saveConflictRef = useRef(false);
+  const pollingSummaryJobIdRef = useRef<string | null>(null);
 
   const effectiveSummaryStates = useMemo(() => {
     const noTopMode = tops.filter((top) => top.trim()).length === 0;
@@ -671,7 +681,7 @@ export default function App() {
     setSkippedAssignment(false);
     setSkipAgendaDetection(false);
     setAutoDetectTopsFromPdf(true);
-    setIsGeneratingSummary(false);
+    setIsStartingSummaryJob(false);
     setSummaryJob(null);
     setIsProcessing(false);
     setProcessingError(null);
@@ -911,39 +921,42 @@ export default function App() {
     };
   }, [applySession, pollPipelineToResult, route.sessionId, route.view]);
 
-  const activeSummaryJobId =
-    summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status)
-      ? summaryJob.summary_job_id
-      : null;
-
   useEffect(() => {
     if (!activeSummaryJobId || !sessionId) return;
-    let cancelled = false;
-    setIsGeneratingSummary(true);
-    void pollSummaryJob(activeSummaryJobId, (job) => {
-      if (!cancelled && ['pending', 'processing', 'cancelling'].includes(job.status)) {
+    const polledJobId = activeSummaryJobId;
+    const polledSessionId = sessionId;
+    pollingSummaryJobIdRef.current = polledJobId;
+    // Reaching a terminal status clears activeSummaryJobId and therefore re-runs
+    // this effect. That must not count as "obsolete", otherwise the run that
+    // actually finished the job would never apply the regenerated summaries.
+    // Only a newer poll or a session switch makes a run obsolete.
+    const isObsolete = () =>
+      pollingSummaryJobIdRef.current !== polledJobId ||
+      activeSessionIdRef.current !== polledSessionId;
+
+    void pollSummaryJob(polledJobId, (job) => {
+      if (!isObsolete() && ['pending', 'processing', 'cancelling'].includes(job.status)) {
         setSummaryJob(job);
       }
     })
       .then(async (completed) => {
-        if (cancelled) return;
+        if (isObsolete()) return;
         setSummaryJob(completed);
-        const refreshed = await loadSession(sessionId);
-        if (cancelled) return;
+        const refreshed = await loadSession(polledSessionId);
+        if (isObsolete()) return;
         applySession(refreshed);
         setCurrentStep(3);
       })
       .catch((error) => {
-        if (!cancelled) {
+        if (!isObsolete()) {
           setSessionMessage(error instanceof Error ? error.message : 'Zusammenfassungsjob fehlgeschlagen');
         }
       })
       .finally(() => {
-        if (!cancelled) setIsGeneratingSummary(false);
+        if (pollingSummaryJobIdRef.current === polledJobId) {
+          pollingSummaryJobIdRef.current = null;
+        }
       });
-    return () => {
-      cancelled = true;
-    };
   }, [activeSummaryJobId, applySession, sessionId]);
 
   const handleRestoreSession = async () => {
@@ -1201,7 +1214,7 @@ export default function App() {
 
   const handleRegenerateSummary = async (topIndices: number[]) => {
     if (!sessionId || topIndices.length === 0) return;
-    setIsGeneratingSummary(true);
+    setIsStartingSummaryJob(true);
     try {
       if (saveTimerRef.current !== null) {
         window.clearTimeout(saveTimerRef.current);
@@ -1239,13 +1252,13 @@ export default function App() {
       setSessionMessage(errorMessage);
       if (error instanceof SessionConflictError) setSessionConflict(errorMessage);
     } finally {
-      setIsGeneratingSummary(false);
+      setIsStartingSummaryJob(false);
     }
   };
 
   const handleAcceptSummary = async (topIndex: number) => {
     if (!sessionId) return;
-    setIsGeneratingSummary(true);
+    setIsStartingSummaryJob(true);
     try {
       if (saveTimerRef.current !== null) {
         window.clearTimeout(saveTimerRef.current);
@@ -1269,7 +1282,7 @@ export default function App() {
       setSessionMessage(message);
       if (error instanceof SessionConflictError) setSessionConflict(message);
     } finally {
-      setIsGeneratingSummary(false);
+      setIsStartingSummaryJob(false);
     }
   };
 

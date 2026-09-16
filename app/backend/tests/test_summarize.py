@@ -94,11 +94,10 @@ def test_summarize_segment_uses_structured_output_and_returns_duration(
     assert request["extra_body"] is None
 
 
-def test_summarize_segment_passes_num_ctx_and_think_when_configured(
+def test_summarize_segment_disables_thinking_as_reasoning_effort(
     fake_openai_module,
     monkeypatch,
 ):
-    monkeypatch.setenv("LLM_NUM_CTX", "8192")
     monkeypatch.setenv("LLM_THINK", "false")
     fake_openai_module.responses = [structured_response()]
 
@@ -109,14 +108,32 @@ def test_summarize_segment_passes_num_ctx_and_think_when_configured(
     )
 
     request = fake_openai_module.instances[0].calls[0]
-    assert request["extra_body"] == {"options": {"num_ctx": 8192}, "think": False}
+    # Ollama reads reasoning_effort; a nested options/think object would be
+    # dropped as an unknown field.
+    assert request["extra_body"] == {"reasoning_effort": "none"}
+
+
+def test_summarize_segment_ignores_an_unusable_think_value(
+    fake_openai_module,
+    monkeypatch,
+):
+    monkeypatch.setenv("LLM_THINK", "sehr gruendlich")
+    fake_openai_module.responses = [structured_response()]
+
+    summarize.summarize_segment(
+        "Haushalt",
+        "SPEAKER_00: Wir beraten den Haushalt.",
+        model="test-model",
+    )
+
+    # Forwarding it would make Ollama reject every request with HTTP 400.
+    assert fake_openai_module.instances[0].calls[0]["extra_body"] is None
 
 
 def test_summarize_segment_passes_think_effort_level_through_unchanged(
     fake_openai_module,
     monkeypatch,
 ):
-    monkeypatch.delenv("LLM_NUM_CTX", raising=False)
     monkeypatch.setenv("LLM_THINK", "low")
     fake_openai_module.responses = [structured_response()]
 
@@ -127,7 +144,7 @@ def test_summarize_segment_passes_think_effort_level_through_unchanged(
     )
 
     request = fake_openai_module.instances[0].calls[0]
-    assert request["extra_body"] == {"think": "low"}
+    assert request["extra_body"] == {"reasoning_effort": "low"}
 
 
 def test_summarize_segment_uses_map_reduce_for_long_transcripts(

@@ -108,11 +108,10 @@ def test_llm_invalid_boundaries_are_repaired(fake_openai_module):
     assert not request["messages"][0]["content"].startswith("/no_think")
 
 
-def test_llm_agenda_detection_passes_configured_num_ctx_and_think(
+def test_llm_agenda_detection_passes_the_configured_reasoning_effort(
     fake_openai_module, monkeypatch
 ):
-    monkeypatch.setenv("LLM_NUM_CTX", "8192")
-    monkeypatch.setenv("LLM_THINK", "true")
+    monkeypatch.setenv("LLM_THINK", "high")
     fake_openai_module.content = """
     {
       "tops": [
@@ -135,7 +134,7 @@ def test_llm_agenda_detection_passes_configured_num_ctx_and_think(
     detect_agenda_from_transcript(transcript, model="test-model")
 
     request = fake_openai_module.instances[0].calls[0]
-    assert request["extra_body"] == {"options": {"num_ctx": 8192}, "think": True}
+    assert request["extra_body"] == {"reasoning_effort": "high"}
 
 
 def test_llm_reasoning_field_is_used_when_content_is_empty(fake_openai_module):

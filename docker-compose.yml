@@ -83,6 +83,9 @@ services:
       - ./scripts/ollama-entrypoint.sh:/ollama-entrypoint.sh:ro
     environment:
       - OLLAMA_MODEL=${LLM_MODEL:-qwen3:8b}
+      # Context window. This is a server setting: Ollama's OpenAI-compatible
+      # endpoint has no per-request num_ctx, so it cannot come from the backend.
+      - OLLAMA_CONTEXT_LENGTH=${OLLAMA_CONTEXT_LENGTH:-}
     entrypoint: ["/bin/bash", "-c", "sed 's/\\r$//' /ollama-entrypoint.sh > /tmp/entrypoint.sh && /bin/bash /tmp/entrypoint.sh"]
     healthcheck:
       test: ["CMD", "ollama", "list"]

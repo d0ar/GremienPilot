@@ -13,21 +13,27 @@ Configuration via environment variables:
 - LLM_MAX_RETRIES: retry count for transient LLM errors (default: 2)
 - LLM_CHUNK_CHARS: target chunk size for long TOP transcripts (default: 12000)
 - LLM_STRUCTURED_FALLBACK: free-text fallback on structured failure (default: true)
-- LLM_NUM_CTX: context window size in tokens passed to Ollama (default: unset,
-  i.e. the model's own default). Ignored by non-Ollama backends.
-- LLM_THINK: enable/disable thinking mode on reasoning models via Ollama's
-  `think` option (true/false, or an effort level like "low"/"medium"/"high"
-  for models that support it). Default: unset, i.e. the model's own default.
-  Ignored by non-Ollama backends.
+- LLM_THINK: thinking mode for reasoning models, sent as the OpenAI
+  `reasoning_effort` field. Accepts false/true (mapped to "none"/"medium")
+  or one of none, minimal, low, medium, high, xhigh, ultra, max.
+  Default: unset, i.e. the model's own default.
+
+The context window is NOT configurable from here: Ollama's OpenAI-compatible
+endpoint builds its option map solely from recognised OpenAI fields and has no
+per-request num_ctx. Set OLLAMA_CONTEXT_LENGTH on the Ollama server instead
+(see docker-compose.yml).
 """
 
 import json
+import logging
 import os
 import re
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 # LLM server configuration (Ollama)
 LOCAL_OLLAMA_BASE_URL = "http://localhost:11434/v1"
@@ -54,32 +60,34 @@ def _is_falsy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"0", "false", "no", "off"}
 
 
-def _parse_num_ctx(value: str | None) -> int | None:
-    if value is None or not value.strip():
-        return None
-    try:
-        parsed = int(value)
-    except ValueError:
-        return None
-    return parsed if parsed > 0 else None
+# Ollama rejects an unknown reasoning effort with HTTP 400, which would fail
+# every summarization, so an unusable value is dropped instead of forwarded.
+REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "ultra", "max"}
 
 
-def _parse_think(value: str | None) -> bool | str | None:
+def _parse_think(value: str | None) -> str | None:
     """
-    Parse LLM_THINK. Accepts a boolean toggle, or (for models with graded
-    effort levels, e.g. gpt-oss) an arbitrary string like "low"/"medium"/
-    "high" passed straight through to the `think` request field.
+    Parse LLM_THINK into an OpenAI `reasoning_effort` value. Booleans map onto
+    the two ends Ollama understands - there is no plain "on", so true selects
+    the middle tier - and effort levels are taken as given.
     """
     if value is None or not value.strip():
         return None
-    if _is_truthy(value):
-        return True
     if _is_falsy(value):
-        return False
-    return value.strip()
+        return "none"
+    if _is_truthy(value):
+        return "medium"
+    effort = value.strip().lower()
+    if effort not in REASONING_EFFORTS:
+        logger.warning(
+            "Ignoring LLM_THINK=%r; expected a boolean or one of %s",
+            value,
+            ", ".join(sorted(REASONING_EFFORTS)),
+        )
+        return None
+    return effort
 
 
-LLM_NUM_CTX = _parse_num_ctx(os.environ.get("LLM_NUM_CTX"))
 LLM_THINK = _parse_think(os.environ.get("LLM_THINK"))
 
 
@@ -147,8 +155,7 @@ class LLMConfig:
     api_key: str
     timeout_seconds: float
     base_url_source: str
-    num_ctx: int | None = None
-    think: bool | str | None = None
+    think: str | None = None
 
     @property
     def uses_internal_ollama(self) -> bool:
@@ -188,27 +195,24 @@ def get_llm_config(model: str | None = None) -> LLMConfig:
         api_key=os.environ.get("LLM_API_KEY", LLM_API_KEY),
         timeout_seconds=float(os.environ.get("LLM_TIMEOUT_SECONDS", str(LLM_TIMEOUT_SECONDS))),
         base_url_source=source,
-        num_ctx=_parse_num_ctx(os.environ["LLM_NUM_CTX"]) if "LLM_NUM_CTX" in os.environ else LLM_NUM_CTX,
         think=_parse_think(os.environ["LLM_THINK"]) if "LLM_THINK" in os.environ else LLM_THINK,
     )
 
 
 def build_llm_extra_body(config: LLMConfig, *, include_think: bool = True) -> dict[str, Any]:
     """
-    Build extra JSON fields for Ollama-specific generation options
-    (context window size, thinking mode) to pass through via the OpenAI
-    client's `extra_body`. Only Ollama's OpenAI-compatible endpoint is known
-    to honor these; other backends should simply ignore unknown fields.
+    Build extra request fields to pass through via the OpenAI client's
+    `extra_body`. `reasoning_effort` is part of the OpenAI schema that Ollama
+    reads and maps onto its own thinking modes; backends without reasoning
+    support ignore it.
 
     include_think=False lets callers that already manage thinking mode
     themselves (e.g. via a "/no_think" system prompt directive) opt out, so
     a globally configured LLM_THINK can't contradict that safeguard.
     """
     extra_body: dict[str, Any] = {}
-    if config.num_ctx is not None:
-        extra_body["options"] = {"num_ctx": config.num_ctx}
     if include_think and config.think is not None:
-        extra_body["think"] = config.think
+        extra_body["reasoning_effort"] = config.think
     return extra_body
 
 

@@ -12,6 +12,8 @@ dependencies = [
     "uvicorn>=0.32.0",
     "python-multipart>=0.0.12",
     "openai>=1.0.0",
+    # Ollama's native /api/chat is the only way to set a per-request context size
+    "httpx>=0.28.0",
     "python-docx>=1.1.2",
     "reportlab>=4.2.0",
     "torch>=2.7.0,<2.8.0",

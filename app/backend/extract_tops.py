@@ -18,7 +18,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Optional
 
-from summarize import build_llm_extra_body, get_llm_config
+from summarize import chat_completion_message, get_llm_config
 
 logger = logging.getLogger(__name__)
 
@@ -389,8 +389,9 @@ def extract_tops_from_text(
 TOPs:"""
 
     try:
-        response = client.chat.completions.create(
-            model=actual_model,
+        message = chat_completion_message(
+            client,
+            config,
             messages=[
                 {"role": "system", "content": actual_system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -399,10 +400,10 @@ TOPs:"""
             temperature=0.1,  # Very low temperature for consistent extraction
             # think intentionally excluded: the "/no_think" system prompt above
             # already prevents empty-content responses from reasoning models.
-            extra_body=build_llm_extra_body(config, include_think=False) or None,
+            include_think=False,
         )
 
-        raw_response = response.choices[0].message.content or ""
+        raw_response = message["content"]
         logger.debug("LLM TOP extraction returned %s characters", len(raw_response))
 
         # Parse the response into individual TOPs
@@ -622,8 +623,9 @@ def extract_agenda_data_from_text(
 JSON:"""
 
     try:
-        response = client.chat.completions.create(
-            model=actual_model,
+        message = chat_completion_message(
+            client,
+            config,
             messages=[
                 {"role": "system", "content": actual_system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -632,10 +634,10 @@ JSON:"""
             temperature=0.1,
             # think intentionally excluded: the "/no_think" system prompt above
             # already prevents empty-content responses from reasoning models.
-            extra_body=build_llm_extra_body(config, include_think=False) or None,
+            include_think=False,
         )
 
-        raw_response = response.choices[0].message.content or ""
+        raw_response = message["content"]
         logger.debug("LLM agenda data extraction returned %s characters", len(raw_response))
 
         result = parse_agenda_data_response(raw_response, fallback_text=repaired_text)

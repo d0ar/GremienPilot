@@ -13,15 +13,16 @@ Configuration via environment variables:
 - LLM_MAX_RETRIES: retry count for transient LLM errors (default: 2)
 - LLM_CHUNK_CHARS: target chunk size for long TOP transcripts (default: 12000)
 - LLM_STRUCTURED_FALLBACK: free-text fallback on structured failure (default: true)
-- LLM_THINK: thinking mode for reasoning models, sent as the OpenAI
-  `reasoning_effort` field. Accepts false/true (mapped to "none"/"medium")
-  or one of none, minimal, low, medium, high, xhigh, ultra, max.
-  Default: unset, i.e. the model's own default.
+- LLM_THINK: thinking mode for reasoning models. Accepts false/true (mapped to
+  "none"/"medium") or one of none, minimal, low, medium, high, xhigh, ultra,
+  max. Default: unset, i.e. the model's own default.
+- LLM_NUM_CTX: context window size in tokens. Ollama only. Default: unset,
+  i.e. whatever the Ollama server itself defaults to.
 
-The context window is NOT configurable from here: Ollama's OpenAI-compatible
-endpoint builds its option map solely from recognised OpenAI fields and has no
-per-request num_ctx. Set OLLAMA_CONTEXT_LENGTH on the Ollama server instead
-(see docker-compose.yml).
+Requests normally go to the configured OpenAI-compatible endpoint. Ollama's
+OpenAI compatibility layer builds its option map solely from recognised OpenAI
+fields and has no per-request num_ctx, so a configured LLM_NUM_CTX is delivered
+over Ollama's native /api/chat instead (see chat_completion_message).
 """
 
 import json
@@ -29,6 +30,8 @@ import logging
 import os
 import re
 import time
+
+import httpx
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -88,7 +91,22 @@ def _parse_think(value: str | None) -> str | None:
     return effort
 
 
+def _parse_num_ctx(value: str | None) -> int | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = int(value)
+    except ValueError:
+        logger.warning("Ignoring LLM_NUM_CTX=%r; expected a positive integer", value)
+        return None
+    if parsed <= 0:
+        logger.warning("Ignoring LLM_NUM_CTX=%r; expected a positive integer", value)
+        return None
+    return parsed
+
+
 LLM_THINK = _parse_think(os.environ.get("LLM_THINK"))
+LLM_NUM_CTX = _parse_num_ctx(os.environ.get("LLM_NUM_CTX"))
 
 
 def is_docker_runtime() -> bool:
@@ -156,6 +174,7 @@ class LLMConfig:
     timeout_seconds: float
     base_url_source: str
     think: str | None = None
+    num_ctx: int | None = None
 
     @property
     def uses_internal_ollama(self) -> bool:
@@ -196,6 +215,7 @@ def get_llm_config(model: str | None = None) -> LLMConfig:
         timeout_seconds=float(os.environ.get("LLM_TIMEOUT_SECONDS", str(LLM_TIMEOUT_SECONDS))),
         base_url_source=source,
         think=_parse_think(os.environ["LLM_THINK"]) if "LLM_THINK" in os.environ else LLM_THINK,
+        num_ctx=_parse_num_ctx(os.environ["LLM_NUM_CTX"]) if "LLM_NUM_CTX" in os.environ else LLM_NUM_CTX,
     )
 
 
@@ -214,6 +234,112 @@ def build_llm_extra_body(config: LLMConfig, *, include_think: bool = True) -> di
     if include_think and config.think is not None:
         extra_body["reasoning_effort"] = config.think
     return extra_body
+
+
+def uses_native_ollama(config: LLMConfig) -> bool:
+    """
+    Whether a request has to go over Ollama's native API. Only a context size
+    forces that; everything else this app needs exists in the OpenAI schema.
+    """
+    return config.uses_ollama and config.num_ctx is not None
+
+
+def _ollama_native_base_url(base_url: str) -> str:
+    normalized = _normalize_base_url(base_url)
+    return normalized[: -len("/v1")] if normalized.endswith("/v1") else normalized
+
+
+def _native_think_value(effort: str) -> bool | str:
+    """
+    Map an OpenAI reasoning effort onto Ollama's native think value, mirroring
+    what its own compatibility layer does for the OpenAI endpoint.
+    """
+    if effort == "none":
+        return False
+    if effort == "minimal":
+        return "low"
+    if effort in {"xhigh", "ultra"}:
+        return "max"
+    return effort
+
+
+def _ollama_native_chat(
+    config: LLMConfig,
+    *,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    include_think: bool,
+    timeout_seconds: float,
+) -> dict[str, str]:
+    payload: dict[str, Any] = {
+        "model": config.model,
+        "messages": messages,
+        "stream": False,
+        "options": {
+            "num_ctx": config.num_ctx,
+            "num_predict": max_tokens,
+            "temperature": temperature,
+        },
+    }
+    if include_think and config.think is not None:
+        payload["think"] = _native_think_value(config.think)
+
+    response = httpx.post(
+        f"{_ollama_native_base_url(config.base_url)}/api/chat",
+        json=payload,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    message = (response.json() or {}).get("message") or {}
+    return {
+        "content": str(message.get("content") or ""),
+        "thinking": str(message.get("thinking") or ""),
+    }
+
+
+def chat_completion_message(
+    client: Any,
+    config: LLMConfig,
+    *,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    include_think: bool = True,
+    timeout_seconds: float | None = None,
+) -> dict[str, str]:
+    """
+    Run one chat completion and return the assistant message as
+    {"content": ..., "thinking": ...}, hiding which of the two Ollama APIs
+    was needed. `client` is only used for the OpenAI-compatible path.
+    """
+    effective_timeout = (
+        config.timeout_seconds if timeout_seconds is None else timeout_seconds
+    )
+    if uses_native_ollama(config):
+        return _ollama_native_chat(
+            config,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            include_think=include_think,
+            timeout_seconds=effective_timeout,
+        )
+
+    response = client.chat.completions.create(
+        model=config.model,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        timeout=effective_timeout,
+        extra_body=build_llm_extra_body(config, include_think=include_think) or None,
+    )
+    message = response.choices[0].message
+    thinking = getattr(message, "reasoning", None) or getattr(message, "reasoning_content", None)
+    return {
+        "content": str(getattr(message, "content", None) or ""),
+        "thinking": str(thinking or ""),
+    }
 
 
 @dataclass
@@ -493,7 +619,10 @@ def _load_openai_client(config: LLMConfig | None = None) -> Any:
 def classify_llm_error(error: Exception) -> LLMErrorInfo:
     """Classify common OpenAI-compatible client errors."""
 
-    status_code = getattr(error, "status_code", None)
+    # httpx (native Ollama path) carries the status on the response instead.
+    status_code = getattr(error, "status_code", None) or getattr(
+        getattr(error, "response", None), "status_code", None
+    )
     name = error.__class__.__name__.lower()
     message = str(error).lower()
 
@@ -639,21 +768,19 @@ def _chat_completion_content(
     max_tokens: int,
     temperature: float,
 ) -> str:
-    extra_body = build_llm_extra_body(config)
     last_error: Exception | None = None
     last_info = LLMErrorInfo("unknown", False)
 
     for attempt in range(LLM_MAX_RETRIES + 1):
         try:
-            response = client.chat.completions.create(
-                model=config.model,
+            message = chat_completion_message(
+                client,
+                config,
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                timeout=LLM_TIMEOUT_SECONDS,
-                extra_body=extra_body or None,
             )
-            content = response.choices[0].message.content or ""
+            content = message["content"]
             if not content.strip():
                 raise LLMCallError(
                     "Leere Antwort des LLM",

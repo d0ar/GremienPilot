@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import summarize
 import pytest
 
@@ -92,6 +94,62 @@ def test_summarize_segment_uses_structured_output_and_returns_duration(
     assert "TOP: Haushalt" in request["messages"][1]["content"]
     assert "SPEAKER_00: Wir beraten den Haushalt." in request["messages"][1]["content"]
     assert request["extra_body"] is None
+
+
+def test_summarize_segment_uses_the_native_ollama_api_for_a_context_size(
+    fake_openai_module,
+    monkeypatch,
+):
+    monkeypatch.setenv("LLM_BASE_URL", "http://ollama:11434/v1")
+    monkeypatch.setenv("LLM_NUM_CTX", "8192")
+    monkeypatch.setenv("LLM_THINK", "false")
+    posts = []
+
+    def fake_post(url, json=None, timeout=None):
+        posts.append({"url": url, "json": json, "timeout": timeout})
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"message": {"content": structured_response()}},
+        )
+
+    monkeypatch.setattr(summarize.httpx, "post", fake_post)
+
+    summarize.summarize_segment(
+        "Haushalt",
+        "SPEAKER_00: Wir beraten den Haushalt.",
+        model="test-model",
+    )
+
+    # The OpenAI-compatible endpoint silently drops num_ctx, so this has to go
+    # to Ollama's native API instead.
+    assert len(posts) == 1
+    assert posts[0]["url"] == "http://ollama:11434/api/chat"
+    assert posts[0]["json"]["options"]["num_ctx"] == 8192
+    assert posts[0]["json"]["think"] is False
+    assert posts[0]["json"]["stream"] is False
+    assert fake_openai_module.instances[0].calls == []
+
+
+def test_summarize_segment_keeps_the_openai_path_without_a_context_size(
+    fake_openai_module,
+    monkeypatch,
+):
+    monkeypatch.setenv("LLM_BASE_URL", "http://ollama:11434/v1")
+    monkeypatch.delenv("LLM_NUM_CTX", raising=False)
+    monkeypatch.setattr(
+        summarize.httpx,
+        "post",
+        lambda *args, **kwargs: pytest.fail("must not call the native API"),
+    )
+    fake_openai_module.responses = [structured_response()]
+
+    summarize.summarize_segment(
+        "Haushalt",
+        "SPEAKER_00: Wir beraten den Haushalt.",
+        model="test-model",
+    )
+
+    assert len(fake_openai_module.instances[0].calls) == 1
 
 
 def test_summarize_segment_disables_thinking_as_reasoning_effort(

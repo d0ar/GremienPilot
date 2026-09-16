@@ -24,7 +24,7 @@ from assignment_suggestions import (
     normalize_text,
     suggest_assignments,
 )
-from summarize import build_llm_extra_body, get_llm_config
+from summarize import chat_completion_message, get_llm_config
 
 
 logger = logging.getLogger(__name__)
@@ -370,29 +370,25 @@ def _detect_with_llm(
         timeout=max(AGENDA_DETECTION_TIMEOUT_SECONDS, AGENDA_DETECTION_MIN_TIMEOUT_SECONDS),
     )
 
-    response = client.chat.completions.create(
-        model=actual_model,
+    message = chat_completion_message(
+        client,
+        config,
         messages=[
             {"role": "system", "content": actual_system_prompt},
             {"role": "user", "content": _build_llm_user_prompt(transcript, tops, heuristic_segments)},
         ],
         temperature=0.1,
         max_tokens=2048,
-        extra_body=build_llm_extra_body(config) or None,
+        timeout_seconds=max(
+            AGENDA_DETECTION_TIMEOUT_SECONDS, AGENDA_DETECTION_MIN_TIMEOUT_SECONDS
+        ),
     )
-    raw_response = _llm_message_text(response.choices[0].message)
-    return _parse_llm_segments(raw_response)
+    return _parse_llm_segments(_llm_message_text(message))
 
 
-def _llm_message_text(message: Any) -> str:
-    content = str(getattr(message, "content", "") or "").strip()
-    if content:
-        return content
-    for attribute in ("reasoning", "reasoning_content"):
-        value = str(getattr(message, attribute, "") or "").strip()
-        if value:
-            return value
-    return ""
+def _llm_message_text(message: dict[str, str]) -> str:
+    """Reasoning models sometimes leave the answer in the thinking output."""
+    return message["content"].strip() or message["thinking"].strip()
 
 
 def _build_llm_user_prompt(

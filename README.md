@@ -302,6 +302,8 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `LLM_MODEL` | Modell für Zusammenfassungen und TOP-Extraktion | `qwen3:8b` |
 | `LLM_TIMEOUT_SECONDS` | Timeout je LLM-Anfrage | `120` |
 | `LLM_CHUNK_CHARS` | Chunk-Größe für lange TOP-Texte | `12000` |
+| `LLM_NUM_CTX` | Kontextfenster in Token. Nur Ollama: der Wert wird über dessen native API gesendet, weil die OpenAI-Schnittstelle kein `num_ctx` kennt | leer (Ollama-Standard) |
+| `LLM_THINK` | Denkmodus für Reasoning-Modelle: `false`/`true` oder `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`, `max` | leer (Modellstandard) |
 | `SPEAKER_EMBEDDING_ENABLED` | lokale Sprecher-Embeddings für prüfbare Matches erzeugen | `true` |
 | `SPEAKER_EMBEDDING_MODEL` | primäres Embedding-Modell | `pyannote/embedding` |
 | `SPEAKER_EMBEDDING_FALLBACK_MODELS` | kommagetrennte Fallback-Modelle, falls das primäre Modell nicht lädt | `pyannote/wespeaker-voxceleb-resnet34-LM` |
@@ -319,6 +321,14 @@ Die wichtigsten Laufzeitvariablen können in `.env` gesetzt werden.
 | `TRANSCRIPTION_CONCURRENCY` | parallele Transkriptionsjobs | `1` |
 | `PIPELINE_CONCURRENCY` | parallele End-to-End-Pipelinejobs | `1` |
 | `SUMMARY_CONCURRENCY` | parallele, manuell bestätigte TOP-Regenerierungsjobs | `1` |
+
+Wo die Variablen gesetzt werden, hängt von der Betriebsart ab: Docker Compose
+liest die `.env` im Repository-Wurzelverzeichnis, ein lokal gestartetes Backend
+liest `app/backend/.env`, und Kubernetes nutzt die ConfigMap. Echte
+Umgebungsvariablen haben immer Vorrang vor der Datei. Ob eine Einstellung
+tatsächlich angekommen ist, zeigt `GET /api/llm/diagnostics` mit `num_ctx`,
+`think` und `uses_native_ollama_api`; zusätzlich protokolliert das Backend vor
+jedem LLM-Aufruf die genutzte API und das gesendete `num_ctx`.
 
 Weitere Optionen stehen in `.env.example`. In Docker Compose sollte
 `LLM_BASE_URL` normalerweise nicht gesetzt werden; der Backend-Container nutzt

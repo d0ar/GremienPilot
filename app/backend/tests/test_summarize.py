@@ -130,6 +130,58 @@ def test_summarize_segment_uses_the_native_ollama_api_for_a_context_size(
     assert fake_openai_module.instances[0].calls == []
 
 
+def test_summarize_segment_sends_the_context_size_to_a_remote_ollama(
+    fake_openai_module,
+    monkeypatch,
+):
+    # An Ollama on its own host is the normal setup once the model server is a
+    # separate machine. Gating num_ctx on a "localhost"/"ollama" hostname used
+    # to drop LLM_NUM_CTX here without a trace.
+    monkeypatch.setenv("LLM_BASE_URL", "http://gpu-server.example.test:11434/v1")
+    monkeypatch.setenv("LLM_NUM_CTX", "32768")
+    monkeypatch.delenv("LLM_THINK", raising=False)
+    monkeypatch.setattr(summarize, "LLM_THINK", None)
+    monkeypatch.setattr(summarize, "_WARNED_UNRECOGNISED_OLLAMA_HOSTS", set())
+    posts = []
+
+    def fake_post(url, json=None, timeout=None):
+        posts.append({"url": url, "json": json})
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: {"message": {"content": structured_response()}},
+        )
+
+    monkeypatch.setattr(summarize.httpx, "post", fake_post)
+
+    summarize.summarize_segment(
+        "Haushalt",
+        "SPEAKER_00: Wir beraten den Haushalt.",
+        model="test-model",
+    )
+
+    assert len(posts) == 1
+    assert posts[0]["url"] == "http://gpu-server.example.test:11434/api/chat"
+    assert posts[0]["json"]["options"]["num_ctx"] == 32768
+    assert fake_openai_module.instances[0].calls == []
+
+
+def test_llm_diagnostics_reports_the_effective_context_size(
+    fake_openai_module,
+    monkeypatch,
+):
+    # The endpoint is how an operator confirms that LLM_NUM_CTX reached the
+    # backend process at all, rather than inferring it from model behaviour.
+    monkeypatch.setenv("LLM_BASE_URL", "http://ollama:11434/v1")
+    monkeypatch.setenv("LLM_NUM_CTX", "8192")
+    monkeypatch.setenv("LLM_THINK", "false")
+
+    diagnostics = summarize.llm_diagnostics(model="test-model")
+
+    assert diagnostics.num_ctx == 8192
+    assert diagnostics.think == "none"
+    assert diagnostics.uses_native_ollama_api is True
+
+
 def test_summarize_segment_keeps_the_openai_path_without_a_context_size(
     fake_openai_module,
     monkeypatch,

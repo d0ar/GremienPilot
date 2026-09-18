@@ -21,8 +21,14 @@ Configuration via environment variables:
 
 Requests normally go to the configured OpenAI-compatible endpoint. Ollama's
 OpenAI compatibility layer builds its option map solely from recognised OpenAI
-fields and has no per-request num_ctx, so a configured LLM_NUM_CTX is delivered
-over Ollama's native /api/chat instead (see chat_completion_message).
+fields and has no per-request num_ctx, so setting LLM_NUM_CTX switches every
+request to Ollama's native /api/chat, whatever host LLM_BASE_URL names (see
+chat_completion_message). Each call logs the API it used and the num_ctx it
+sent, and /api/llm/diagnostics reports the same values.
+
+For local backend development these variables are read from app/backend/.env
+(see env_file); real environment variables, as set by Docker Compose and
+Kubernetes, always take precedence over that file.
 """
 
 import json
@@ -201,6 +207,11 @@ class LLMAvailability:
     model_available: bool
     available_models: list[str] = field(default_factory=list)
     message: str = ""
+    # Effective LLM_NUM_CTX/LLM_THINK, so a caller can confirm the settings
+    # arrived in the backend process instead of guessing from model behaviour.
+    num_ctx: int | None = None
+    think: str | None = None
+    uses_native_ollama_api: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -236,12 +247,35 @@ def build_llm_extra_body(config: LLMConfig, *, include_think: bool = True) -> di
     return extra_body
 
 
+# Warn once per endpoint instead of once per chunked LLM call.
+_WARNED_UNRECOGNISED_OLLAMA_HOSTS: set[str] = set()
+
+
 def uses_native_ollama(config: LLMConfig) -> bool:
     """
     Whether a request has to go over Ollama's native API. Only a context size
     forces that; everything else this app needs exists in the OpenAI schema.
+
+    A configured LLM_NUM_CTX is the caller asserting that the endpoint is
+    Ollama, so it is honoured for any host. Gating this on a hostname of
+    "localhost" or "ollama" used to drop the setting without a trace for every
+    Ollama reachable under its own name or IP, which is the normal case once
+    the model server runs on a different machine.
     """
-    return config.uses_ollama and config.num_ctx is not None
+    if config.num_ctx is None:
+        return False
+    if not config.uses_ollama:
+        host = _base_url_host(config.base_url)
+        if host not in _WARNED_UNRECOGNISED_OLLAMA_HOSTS:
+            _WARNED_UNRECOGNISED_OLLAMA_HOSTS.add(host)
+            logger.warning(
+                "LLM_NUM_CTX=%s is set, so requests go to Ollama's native API at "
+                "%s. num_ctx exists only in Ollama; unset LLM_NUM_CTX if this "
+                "endpoint is a different OpenAI-compatible backend.",
+                config.num_ctx,
+                _ollama_native_base_url(config.base_url),
+            )
+    return True
 
 
 def _ollama_native_base_url(base_url: str) -> str:
@@ -316,7 +350,18 @@ def chat_completion_message(
     effective_timeout = (
         config.timeout_seconds if timeout_seconds is None else timeout_seconds
     )
-    if uses_native_ollama(config):
+    native = uses_native_ollama(config)
+    # The effective configuration is the only way to tell from a log whether a
+    # configured LLM_NUM_CTX actually reached the model server.
+    logger.info(
+        "LLM call: api=%s base_url=%s model=%s num_ctx=%s think=%s",
+        "ollama-native" if native else "openai-compatible",
+        _ollama_native_base_url(config.base_url) if native else config.base_url,
+        config.model,
+        config.num_ctx if native else "not sent",
+        (config.think if include_think else "suppressed by caller") or "model default",
+    )
+    if native:
         return _ollama_native_chat(
             config,
             messages=messages,
@@ -677,6 +722,12 @@ def _llm_hint(config: LLMConfig, *, model_missing: bool = False) -> str:
             f" Starten Sie lokal Ollama und laden Sie das Modell: "
             f"ollama pull {config.model}."
         )
+    elif config.num_ctx is not None:
+        # LLM_NUM_CTX is Ollama-only, so this is an Ollama on its own host.
+        pull_hint = (
+            f" Laden Sie das Modell auf dem Ollama-Host "
+            f"{_base_url_host(config.base_url)}: ollama pull {config.model}."
+        )
     else:
         pull_hint = " Prüfen Sie die externe OpenAI-kompatible LLM-Konfiguration."
 
@@ -739,6 +790,9 @@ def check_llm_availability(
         model_available=True,
         available_models=available_models,
         message="LLM-Dienst ist erreichbar und das Modell ist verfügbar.",
+        num_ctx=config.num_ctx,
+        think=config.think,
+        uses_native_ollama_api=uses_native_ollama(config),
     )
 
 
@@ -757,6 +811,9 @@ def llm_diagnostics(model: str | None = None) -> LLMAvailability:
             service_reachable=error.category == "model_missing",
             model_available=False,
             message=str(error),
+            num_ctx=config.num_ctx,
+            think=config.think,
+            uses_native_ollama_api=uses_native_ollama(config),
         )
 
 
@@ -802,6 +859,13 @@ def _chat_completion_content(
         hint = (
             f" Prüfen Sie, ob der LLM-Dienst erreichbar ist "
             f"(LLM_BASE_URL={config.base_url})."
+        )
+    elif last_info.category == "client" and uses_native_ollama(config):
+        # LLM_NUM_CTX routes to /api/chat, which only Ollama serves.
+        hint = (
+            f" Wegen LLM_NUM_CTX={config.num_ctx} geht die Anfrage an "
+            f"{_ollama_native_base_url(config.base_url)}/api/chat. Setzen Sie "
+            f"LLM_NUM_CTX nur, wenn dort Ollama läuft."
         )
     raise LLMCallError(
         f"LLM-Aufruf fehlgeschlagen ({last_info.category}): {last_error}.{hint}",

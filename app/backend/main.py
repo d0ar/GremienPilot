@@ -1244,6 +1244,9 @@ class LLMDiagnosticsResponse(BaseModel):
     model_available: bool
     available_models: List[str] = Field(default_factory=list)
     message: str
+    num_ctx: Optional[int] = None
+    think: Optional[str] = None
+    uses_native_ollama_api: bool = False
 
 
 class ExtractTOPsResponse(BaseModel):

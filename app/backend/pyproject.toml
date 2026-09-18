@@ -44,6 +44,7 @@ py-modules = [
     "source_contract",
     "agenda_labels",
     "assignment_suggestions",
+    "env_file",
     "export_protocol",
     "extract_tops",
     "main",

@@ -20,6 +20,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
+# Must run before the modules below, which read os.environ at import time.
+from env_file import load_env_file
+
+load_env_file()
+
 from fastapi import (
     FastAPI,
     UploadFile,

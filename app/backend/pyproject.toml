@@ -34,6 +34,7 @@ test = [
 py-modules = [
     "agenda_detection",
     "assignment_suggestions",
+    "env_file",
     "export_protocol",
     "extract_tops",
     "main",

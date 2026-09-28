@@ -7,6 +7,12 @@ import re
 
 import pytest
 
+import env_file
+
+# main loads app/backend/.env on import; a developer's local settings there
+# (e.g. MAX_UPLOAD_BYTES) must not change what the tests see.
+env_file.DEFAULT_ENV_PATH = Path(__file__).resolve().parent / "no-such-dir" / ".env"
+
 
 @pytest.fixture(autouse=True)
 def isolated_llm_transport(monkeypatch, request):

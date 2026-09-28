@@ -21,7 +21,7 @@ def test_load_env_file_applies_variables_from_the_file(tmp_path, isolated_enviro
     path = tmp_path / ".env"
     path.write_text(
         "# Kontextgroesse\n"
-        "LLM_NUM_CTX=32768\n"
+        "LLM_CONTEXT_TOKENS=32768\n"
         "\n"
         'export LLM_MODEL="qwen3:8b"\n'
         "MALFORMED_LINE\n",
@@ -30,8 +30,8 @@ def test_load_env_file_applies_variables_from_the_file(tmp_path, isolated_enviro
 
     applied = env_file.load_env_file(path)
 
-    assert applied == {"LLM_NUM_CTX": "32768", "LLM_MODEL": "qwen3:8b"}
-    assert isolated_environ["LLM_NUM_CTX"] == "32768"
+    assert applied == {"LLM_CONTEXT_TOKENS": "32768", "LLM_MODEL": "qwen3:8b"}
+    assert isolated_environ["LLM_CONTEXT_TOKENS"] == "32768"
     assert isolated_environ["LLM_MODEL"] == "qwen3:8b"
 
 
@@ -39,11 +39,11 @@ def test_load_env_file_never_overrides_the_real_environment(tmp_path, isolated_e
     # Compose, Kubernetes and an inline VAR=value start command have to win
     # over a file that may be a stale local copy.
     path = tmp_path / ".env"
-    path.write_text("LLM_NUM_CTX=4096\n", encoding="utf-8")
-    isolated_environ["LLM_NUM_CTX"] = "32768"
+    path.write_text("LLM_CONTEXT_TOKENS=4096\n", encoding="utf-8")
+    isolated_environ["LLM_CONTEXT_TOKENS"] = "32768"
 
     assert env_file.load_env_file(path) == {}
-    assert isolated_environ["LLM_NUM_CTX"] == "32768"
+    assert isolated_environ["LLM_CONTEXT_TOKENS"] == "32768"
 
 
 def test_load_env_file_tolerates_a_missing_file(tmp_path, isolated_environ):

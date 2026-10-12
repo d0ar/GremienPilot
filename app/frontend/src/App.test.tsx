@@ -7,6 +7,7 @@ import {
   checkBackendHealth,
   extractAgendaDataFromPDF,
   getPipelineResult,
+  openRetainedPipelineResult,
   getPipelineStatus,
   loadSession,
   listSessions,
@@ -30,6 +31,7 @@ vi.mock('./api', () => ({
   pollPipeline: vi.fn(),
   getPipelineStatus: vi.fn(),
   getPipelineResult: vi.fn(),
+  openRetainedPipelineResult: vi.fn(),
   cancelPipeline: vi.fn(),
   startSummaryJob: vi.fn(),
   pollSummaryJob: vi.fn(),
@@ -69,6 +71,7 @@ function pipelineResult(
     pipeline,
     session: {
       session_id: 'session-1',
+      revision: 1,
       job_id: 'job-1',
       current_step: 3,
       tops: ['Haushalt'],
@@ -138,6 +141,33 @@ async function uploadAndStart(user = userEvent.setup()) {
 }
 
 describe('App pipeline flow', () => {
+  it('offers a separate result after a revision conflict without applying it to the edited session', async () => {
+    const user = userEvent.setup();
+    const conflict = { ...completedPipeline, retained_result_available: true };
+    const edited = pipelineResult({ tops: ['Manuell bearbeitet'], agenda_proposals: null }, conflict);
+    vi.mocked(getPipelineResult).mockResolvedValue(edited);
+    vi.mocked(pollPipeline).mockResolvedValue(conflict);
+    vi.mocked(openRetainedPipelineResult).mockResolvedValue(pipelineResult({ session_id: 'result-copy' }).session);
+    vi.mocked(loadSession).mockImplementation(async id => id === 'result-copy'
+      ? pipelineResult({ session_id: 'result-copy' }).session : edited.session);
+    await uploadAndStart(user);
+    const open = await screen.findByRole('button', { name: 'Ergebnis als eigene Sitzung öffnen' });
+    expect(screen.getByText(/Sitzung wurde während der Verarbeitung geändert/)).toBeInTheDocument();
+    expect(openRetainedPipelineResult).not.toHaveBeenCalled();
+    await user.click(open);
+    await waitFor(() => expect(window.location.pathname).toBe('/sessions/result-copy'));
+    expect(openRetainedPipelineResult).toHaveBeenCalledWith('pipeline-1');
+  });
+
+  it('keeps the separate result accessible when reopening the edited session', async () => {
+    window.history.replaceState(null, '', '/sessions/session-1');
+    vi.mocked(loadSession).mockResolvedValue(pipelineResult({
+      latest_pipeline: { ...completedPipeline, retained_result_available: true },
+    }).session);
+    render(<App />);
+    expect(await screen.findByRole('button', { name: 'Ergebnis als eigene Sitzung öffnen' })).toBeInTheDocument();
+  });
+
   it('persists Fast, locks it during processing and opens the unreviewed result directly', async () => {
     const user = userEvent.setup();
     let finish!: (job: PipelineJob) => void;
@@ -209,6 +239,7 @@ describe('App pipeline flow', () => {
     });
     vi.mocked(saveSession).mockResolvedValue({
       session_id: 'session-1',
+      revision: 1,
       tops: ['Haushalt'],
       transcript: [],
       assignments: [],
@@ -276,12 +307,64 @@ describe('App pipeline flow', () => {
     expect(options).not.toHaveProperty('pdfSystemPrompt');
   });
 
+  it('restores custom preferences from localStorage for new pipelines', async () => {
+    localStorage.setItem('llm-settings', JSON.stringify({ model: '', summaryStyle: 'gemma4-custom', customSummaryPrompt: 'LOCAL_STYLE' }));
+    await uploadAndStart();
+    await waitFor(() => expect(startPipeline).toHaveBeenCalled());
+    expect(vi.mocked(startPipeline).mock.calls[0]![1]).toMatchObject({
+      summaryStyle: 'gemma4-custom', customSummaryPrompt: 'LOCAL_STYLE',
+    });
+  });
+
+  it('keeps new preferences when a pipeline with older settings completes', async () => {
+    const user = userEvent.setup();
+    let finish!: (value: PipelineJob) => void;
+    vi.mocked(pollPipeline).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    vi.mocked(getPipelineResult).mockResolvedValue(pipelineResult({ summary_style: 'gemma4-lora' }));
+    await uploadAndStart();
+    await waitFor(() => expect(finish).toBeDefined());
+    const submitted = { ...vi.mocked(startPipeline).mock.calls[0]![1] };
+    await user.click(screen.getByRole('button', { name: 'KI-Einstellungen' }));
+    fireEvent.change(screen.getByLabelText('Zusammenfassungsstil'), { target: { value: 'gemma4-custom' } });
+    fireEvent.change(screen.getByLabelText('System-Prompt'), { target: { value: 'NEXT_JOB_STYLE' } });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await act(async () => { finish(completedPipeline); });
+    await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.');
+    expect(vi.mocked(startPipeline).mock.calls[0]![1]).toEqual(submitted);
+    expect(submitted.summaryStyle).toBe('gemma4-lora');
+    expect(JSON.parse(localStorage.getItem('llm-settings')!)).toMatchObject({
+      summaryStyle: 'gemma4-custom', customSummaryPrompt: 'NEXT_JOB_STYLE',
+    });
+  });
+
+  it('reopens session preferences and snapshots them for TOP regeneration', async () => {
+    const user = userEvent.setup();
+    const original = pipelineResult({ summary_style: 'gemma4-custom', custom_summary_prompt: 'SESSION_STYLE' }).session;
+    vi.mocked(loadSession).mockResolvedValue(original);
+    vi.mocked(saveSession).mockImplementation(async payload => ({ ...payload, session_id: 'session-1', revision: payload.revision ?? 1 }));
+    window.history.replaceState(null, '', '/sessions/session-1');
+    render(<App />);
+    await screen.findByText(original.summaries[0]!);
+    await user.click(screen.getByRole('button', { name: 'Neu generieren' }));
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+    await waitFor(() => expect(startSummaryJob).toHaveBeenCalledWith('session-1', expect.objectContaining({
+      summaryStyle: 'gemma4-custom', customSummaryPrompt: 'SESSION_STYLE',
+    })));
+    expect(saveSession).toHaveBeenCalledWith(expect.objectContaining({
+      summary_style: 'gemma4-custom', custom_summary_prompt: 'SESSION_STYLE',
+    }));
+    expect(JSON.parse(localStorage.getItem('llm-settings')!)).toMatchObject({
+      summaryStyle: 'gemma4-custom', customSummaryPrompt: 'SESSION_STYLE',
+    });
+  });
+
   it('keeps a saved legacy prompt as the summary preference', async () => {
     localStorage.setItem('llm-settings', JSON.stringify({ model: 'saved-model', systemPrompt: 'Gespeicherte Fachvorgabe' }));
     await uploadAndStart();
     await waitFor(() => expect(startPipeline).toHaveBeenCalled());
     const options = vi.mocked(startPipeline).mock.calls[0]![1]!;
     expect(options.summarySystemPrompt).toBe('Gespeicherte Fachvorgabe');
+    expect(options.summaryStyle).toBe('gemma4-lora');
     expect(options.model).toBe('saved-model');
     expect(options).not.toHaveProperty('systemPrompt');
     expect(options).not.toHaveProperty('agendaSystemPrompt');
@@ -361,6 +444,36 @@ describe('App pipeline flow', () => {
 
     expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
     expect(startSummaryJob).not.toHaveBeenCalled();
+  });
+
+  it('retains Gemma findings when editing and autosaving the reopened prose', async () => {
+    const user = userEvent.setup();
+    const text = '## Zu TOP 1:\n\nUnveränderter Entwurf.';
+    const finding = { kind: 'contradiction', message: 'Zahl 9 gegen 5 prüfen.', severity: 'warning', line_indices: [], excerpt: '9 Euro' };
+    const review = { structured: { discussion: [], decisions: [], votes: [], action_items: [], open_points: [], uncertainties: [],
+      protocol_text: text, verification: { source_contract: 'gemma-prose-review-v1', review_complete: true },
+      review_questions: [{ kind: 'contradiction', question: finding.message, excerpts: ['9 Euro'] }] },
+      source_links: [], review_warnings: [finding], llm_usage: { processing_mode: 'slow', processing_complete: true, review_complete: true } };
+    const original = pipelineResult({ revision: 1, summaries: { 0: text }, summary_reviews: { 0: review } }).session;
+    vi.mocked(loadSession).mockResolvedValue(original);
+    vi.mocked(saveSession).mockImplementation(async payload => ({ ...payload, session_id: 'session-1', revision: (payload.revision ?? 0) + 1 }));
+    window.history.replaceState(null, '', '/sessions/session-1');
+    render(<App />);
+    await screen.findByText(/Unveränderter Entwurf\./);
+    await user.click(screen.getByTitle('Bearbeiten'));
+    const edited = text + '\n\nManuelle Ergänzung.';
+    fireEvent.change(screen.getByLabelText('Zusammenfassung bearbeiten'), { target: { value: edited } });
+    await user.click(screen.getByRole('button', { name: 'Speichern' }));
+    expect(screen.getByText(finding.message)).toBeInTheDocument();
+    expect(screen.getByText(/Entwurf erhalten; Inhaltsprüfung unvollständig/)).toBeInTheDocument();
+    expect(screen.queryByText(/Inhaltsprüfungen abgeschlossen/)).not.toBeInTheDocument();
+    await waitFor(() => expect(saveSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      summaries: { 0: edited }, summary_reviews: { 0: expect.objectContaining({
+        structured: expect.objectContaining({ protocol_text: edited, review_questions: review.structured.review_questions,
+          verification: expect.objectContaining({ review_complete: false, review_status: 'stale' }) }),
+        review_warnings: expect.arrayContaining([finding]),
+      }) },
+    })));
   });
 
   it('merges a delayed single-job result before stopping polling and exports and saves that result', async () => {
@@ -650,6 +763,40 @@ describe('App pipeline flow', () => {
       expect(pollPipeline).toHaveBeenCalledWith('pipeline-1', expect.any(Function));
     });
     expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
+  });
+
+  it.each(['completed', 'failed'] as const)('does not autosave a blank draft while restoring a %s pipeline', async status => {
+    const user = userEvent.setup();
+    localStorage.setItem('active-pipeline-id', 'pipeline-1');
+    localStorage.setItem('active-session-id', 'session-1');
+    const result = pipelineResult({ revision: 6 });
+    let finish!: () => void;
+    vi.mocked(getPipelineStatus).mockResolvedValue({ ...completedPipeline, status });
+    if (status === 'completed') {
+      vi.mocked(getPipelineResult).mockImplementationOnce(() => new Promise(resolve => {
+        finish = () => resolve(result);
+      }));
+    } else {
+      vi.mocked(loadSession).mockImplementationOnce(() => new Promise(resolve => {
+        finish = () => resolve(result.session);
+      }));
+    }
+
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /letzte sitzung fortsetzen/i }));
+    await waitFor(() => expect(finish).toBeDefined());
+    // The result can take longer than the 500 ms autosave debounce to load.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 700)); });
+    expect(saveSession).not.toHaveBeenCalled();
+    expect(localStorage.getItem('active-session-draft')).toBeNull();
+
+    await act(async () => { finish(); });
+    expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 700)); });
+    for (const [payload] of vi.mocked(saveSession).mock.calls) {
+      expect(payload).toMatchObject({ revision: 6, tops: ['Haushalt'], assignments: [0],
+        summaries: { 0: 'Der Haushalt wurde serverseitig zusammengefasst.' } });
+    }
   });
 
   it('clears a failed restored pipeline id and loads the saved session', async () => {

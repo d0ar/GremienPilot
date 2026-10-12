@@ -1,4 +1,4 @@
-import type { ProcessingMode } from './types';
+import type { ProcessingMode, SummaryStyle } from './types';
 /**
  * API client for the GremienPilot backend
  */
@@ -36,6 +36,17 @@ export class SessionConflictError extends Error {
     this.name = "SessionConflictError";
     this.actualRevision = actualRevision;
   }
+}
+
+export async function openRetainedPipelineResult(pipelineId: string): Promise<SessionResponse> {
+  const response = await fetch(`${API_BASE}/api/pipeline/${encodeURIComponent(pipelineId)}/draft-session`, {
+    method: 'POST',
+  });
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.detail || 'Verarbeitungsergebnis konnte nicht geöffnet werden');
+  }
+  return response.json();
 }
 
 export const API_BASE = import.meta.env.VITE_API_URL || "";
@@ -166,6 +177,8 @@ export async function startPipeline(
   }
   for (const [field, prompt] of [
     ["summary_system_prompt", options.summarySystemPrompt],
+    ["summary_style", options.summaryStyle],
+    ["custom_summary_prompt", options.customSummaryPrompt],
     ["agenda_system_prompt", options.agendaSystemPrompt],
     ["pdf_system_prompt", options.pdfSystemPrompt],
   ] as const) {
@@ -389,6 +402,8 @@ export async function startSummaryJob(
   payload: {
     revision?: number | null;
     topIds: string[];
+    summaryStyle?: SummaryStyle;
+    customSummaryPrompt?: string;
     model?: string;
     systemPrompt?: string;
   }
@@ -401,6 +416,8 @@ export async function startSummaryJob(
       top_ids: payload.topIds,
       model: payload.model,
       system_prompt: payload.systemPrompt,
+      summary_style: payload.summaryStyle,
+      custom_summary_prompt: payload.customSummaryPrompt,
     }),
   });
   if (response.status === 409) {
@@ -528,6 +545,8 @@ export async function pollTranscription(
  * Options for summary generation.
  */
 export interface SummarizeOptions {
+  summaryStyle?: SummaryStyle;
+  customSummaryPrompt?: string;
   processingMode?: ProcessingMode;
   model?: string;
   systemPrompt?: string;
@@ -537,6 +556,7 @@ export interface SummarizeOptions {
  * Result from summary generation including timing.
  */
 export interface SummarizeResult {
+  llmUsage?: Record<string, unknown>;
   summary: string;
   durationSeconds: number;
   structured?: StructuredSummary | null;
@@ -566,6 +586,8 @@ export async function generateSummary(
       lines: lines,
       model: options?.model,
       system_prompt: options?.systemPrompt,
+      summary_style: options?.summaryStyle,
+      custom_summary_prompt: options?.customSummaryPrompt,
       processing_mode: options?.processingMode ?? "slow",
     }),
   });
@@ -584,6 +606,7 @@ export async function generateSummary(
     reviewWarnings: data.review_warnings ?? [],
     fallbackUsed: Boolean(data.fallback_used),
     chunksProcessed: data.chunks_processed ?? 1,
+    llmUsage: data.llm_usage ?? {},
   };
 }
 
@@ -622,7 +645,7 @@ export interface ModelJob {
   state: 'queued' | 'running' | 'retry_wait' | 'review_required' | 'failed' | 'completed' | 'cancelled' | 'superseded';
   created_at?: number;
   updated_at?: number;
-  progress?: { phase?: string; agenda_phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number; processed_lines?: number; total_lines?: number; model_calls?: number; elapsed_seconds?: number };
+  progress?: { phase?: string; agenda_phase?: string; summary_phase?: string; pdf_phase?: string; page?: number; total_pages?: number; round?: number; last_delta_at?: number | null; silence_seconds?: number; processed_lines?: number; total_lines?: number; model_calls?: number; elapsed_seconds?: number };
   source?: { enforce_top_order?: boolean; tops: string[]; top_ids: string[]; transcript: TranscriptLine[]; processing_mode?: ProcessingMode };
   error?: string | null;
   result?: unknown;
@@ -1035,6 +1058,12 @@ export function pdfResultUsable(data: PdfAgendaExtractionResult, mode: Processin
     : !data.review_required;
 }
 
+export function pdfResultReviewable(data: PdfAgendaExtractionResult, mode: ProcessingMode): boolean {
+  return pdfResultUsable(data, mode) || Boolean(mode === 'slow' && (data.processing_mode ?? 'slow') === 'slow'
+    && data.contract_version === 'page-evidence-v3' && data.tops?.length && data.items?.length
+    && data.review_required && data.review_questions?.length);
+}
+
 export async function extractAgendaDataFromPDF(
   pdfFile: File,
   options?: ExtractTOPsOptions
@@ -1066,7 +1095,7 @@ export async function extractAgendaDataFromPDF(
   const data = started.job_id
     ? await pollModelJob<PdfAgendaExtractionResult>(started.job_id, options?.signal, options?.onStatus)
     : started;
-  if (!pdfResultUsable(data, options?.processingMode ?? "slow")) {
+  if (!pdfResultReviewable(data, options?.processingMode ?? "slow")) {
     throw new Error('PDF-Auswertung ist nicht vollständig geprüft. Ergebnis wurde nicht übernommen.');
   }
   return { ...data, tops: data.tops ?? [], metadata: data.metadata ?? {} };

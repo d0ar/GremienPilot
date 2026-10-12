@@ -5,6 +5,7 @@ FastAPI Backend for Meeting Minutes Generator
 import os
 import re
 import json
+from copy import deepcopy
 import uuid
 import time
 import logging
@@ -18,7 +19,7 @@ from dataclasses import asdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Literal
 
 # Must run before the modules below, which read os.environ at import time.
 from env_file import load_env_file
@@ -55,7 +56,7 @@ from summarize import (
     meeting_context_from_transcript,
     summarize_segment,
 )
-from processing_mode import ProcessingMode, agenda_complete as agenda_processing_complete, pdf_usable
+from processing_mode import ProcessingMode, agenda_complete as agenda_processing_complete, pdf_usable, pdf_reviewable
 from extract_tops import extract_agenda_data_from_pdf
 from assignment_suggestions import TranscriptUtterance, suggest_assignments
 from agenda_detection import detect_agenda_from_transcript, segment_known_agenda
@@ -635,6 +636,7 @@ class PipelineStartResponse(BaseModel):
 
 
 class PipelineStatusResponse(BaseModel):
+    retained_result_available: bool = False
     execution: Optional[Dict[str, Any]] = None
     pipeline_id: str
     session_id: Optional[str] = None
@@ -649,6 +651,7 @@ class PipelineStatusResponse(BaseModel):
 
 
 class SummaryJobResponse(BaseModel):
+    llm_progress: Dict[str, Any] = Field(default_factory=dict)
     execution: Optional[Dict[str, Any]] = None
     summary_job_id: str
     session_id: str
@@ -667,6 +670,8 @@ class SummaryJobResponse(BaseModel):
 
 
 class SessionSaveRequest(BaseModel):
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = None
+    custom_summary_prompt: Optional[str] = None
     enforce_top_order: StrictBool = False
     pdf_source_job_id: Optional[str] = None
     processing_mode: ProcessingMode = "slow"
@@ -688,6 +693,8 @@ class SessionSaveRequest(BaseModel):
 
 
 class SessionResponse(BaseModel):
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = None
+    custom_summary_prompt: Optional[str] = None
     enforce_top_order: StrictBool = False
     pdf_source_job_id: Optional[str] = None
     has_pdf_source: bool = False
@@ -858,6 +865,8 @@ class SpeakerObservationManualRequest(BaseModel):
 
 
 class SummarizeRequest(BaseModel):
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = None
+    custom_summary_prompt: Optional[str] = None
     processing_mode: ProcessingMode = "slow"
     top_title: str
     lines: List[TranscriptLine]
@@ -866,6 +875,7 @@ class SummarizeRequest(BaseModel):
 
 
 class StructuredSummaryResponse(BaseModel):
+    protocol_text: Optional[str] = None
     rejected_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     evidence: List[Dict[str, Any]] = Field(default_factory=list)
     review_questions: List[Dict[str, Any]] = Field(default_factory=list)
@@ -918,6 +928,8 @@ class SummarizeResponse(BaseModel):
 
 
 class SummaryJobCreateRequest(BaseModel):
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = None
+    custom_summary_prompt: Optional[str] = None
     revision: Optional[int] = None
     top_ids: List[str] = Field(default_factory=list, min_length=1)
     model: Optional[str] = None
@@ -1149,7 +1161,8 @@ def session_pdf_extraction(session, pipeline=None):
         source = durable.load(source_id)
         if source and source['kind'] == 'pdf' and source.get('result'):
             return source['result']
-    return _pipeline_refs(pipeline).get('pdf_extraction') if pipeline else None
+    return ((_pipeline_refs(pipeline).get('pdf_extraction') if pipeline else None) or
+            ((session.get('agenda_proposals') or {}).get('source') or {}).get('pdf_extraction'))
 
 
 def session_pdf_document(session, pipeline=None):
@@ -1195,6 +1208,8 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
             summary_states.setdefault(top_index, fallback_state)
 
     return SessionResponse(
+        summary_style=session.get("summary_style"),
+        custom_summary_prompt=session.get("custom_summary_prompt"),
         pdf_source_job_id=session.get('pdf_source_job_id'),
         has_pdf_source=bool(session_pdf_document(session, latest_pipeline)),
         latest_pdf_job=durable.public(work) if (work := durable.latest_for_session(session['session_id'], 'pdf')) else None,
@@ -1238,6 +1253,7 @@ def build_session_response(session: dict[str, Any]) -> SessionResponse:
 def build_summary_job_response(job: dict[str, Any]) -> SummaryJobResponse:
     refs = dict(job.get("refs") or {})
     return SummaryJobResponse(
+        llm_progress=refs.get('llm_progress') or {},
         execution=durable.public(work) if (work := durable.load(job["summary_job_id"])) else None,
         summary_job_id=job["summary_job_id"],
         session_id=job["session_id"],
@@ -1905,12 +1921,17 @@ def parse_pipeline_options(raw_options: str | None) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Optionen müssen ein JSON-Objekt sein")
     if parsed.get("agenda_use_llm") is not None and type(parsed["agenda_use_llm"]) is not bool:
         raise HTTPException(status_code=400, detail="agenda_use_llm muss boolesch oder null sein")
+    if parsed.get('summary_style') not in (None, 'gemma4-lora', 'gemma4-custom'):
+        raise HTTPException(status_code=400, detail="Ungültiger Zusammenfassungsstil")
+    if parsed.get('custom_summary_prompt') is not None and not isinstance(parsed['custom_summary_prompt'], str):
+        raise HTTPException(status_code=400, detail="Eigener Stilprompt muss Text sein")
     return parsed
 
 
 def build_pipeline_status_response(job: dict[str, Any]) -> PipelineStatusResponse:
     refs = _pipeline_refs(job)
     return PipelineStatusResponse(
+        retained_result_available=bool(refs.get('retained_result_available')),
         execution=durable.public(work) if (work := durable.load(job["pipeline_job_id"])) else None,
         pipeline_id=job["pipeline_job_id"],
         session_id=job.get("session_id"),
@@ -1930,6 +1951,8 @@ def session_agenda_proposals(
 ) -> dict[str, Any] | None:
     if session.get("agenda_proposals") is not None:
         return session["agenda_proposals"]
+    if latest_pipeline and _pipeline_refs(latest_pipeline).get('retained_result_available'):
+        return None
     # Old pipeline artifacts have no immutable input snapshot. Preserve warnings,
     # but never rebind their positional indices to today's edited session.
     info = _pipeline_refs(latest_pipeline).get("agenda") if latest_pipeline else None
@@ -2096,6 +2119,11 @@ def preserve_assignment_questions(result, session, source_indices):
     if not open_rows or not result.structured:
         return
     question = 'Gehören diese Originalbeiträge tatsächlich zu diesem TOP, einschließlich gemeinsamer Beratung oder Wiederaufnahme?'
+    if result.structured.verification.get('source_contract') == 'gemma-prose-review-v1':
+        if not any(q.get('kind') == 'assignment_open' for q in result.structured.review_questions):
+            result.structured.review_questions.append(dict(kind='assignment_open', question=question, excerpts=[]))
+        result.llm_usage.update(review_required=True, assignment_review_required=True)
+        return
     for item in result.structured.evidence:
         g = item.get('grounding') or {'reference_status': 'exact', 'source_ids': [r['source_id'] for r in item['sources']]}
         item['grounding'] = ({**g, 'content_status': 'unreviewed'}
@@ -2294,7 +2322,19 @@ def reconcile_session_summaries(
         )
         fast_manual = (manually_edited and (old_review.get('llm_usage') or {}).get('processing_mode') == 'fast'
                        and (old_review.get('llm_usage') or {}).get('processing_complete') is True)
-        if fast_manual:
+        gemma_prose = (review.get('structured') or {}).get('verification', {}).get('source_contract') == 'gemma-prose-review-v1'
+        if not gemma_prose and (old_review.get('structured') or {}).get('verification', {}).get('source_contract') == 'gemma-prose-review-v1':
+            # Older clients may discard review metadata while editing. Keep the
+            # historical findings; only a new generation replaces that result.
+            review = expected_review
+            gemma_prose = True
+        if gemma_prose:
+            # Preserve review findings and their historical text; editing cannot
+            # inherit completed checks, remove findings or rewrite the new prose.
+            review = deepcopy(review)
+            review['structured']['protocol_text'] = summary
+            review['source_links'] = []
+        elif fast_manual:
             from export_protocol import parse_summary_sections
             from summarize import StructuredSummary
             from processing_mode import FAST_NOTICE
@@ -2340,12 +2380,15 @@ def reconcile_session_summaries(
             names = state.get('speaker_names') or {}
             source_lines = [format_line_for_summary(line_to_dict(state['transcript'][i]), names)
                             for i in summary_line_indices(state, index)]
-            if fast_manual:
+            if fast_manual and not gemma_prose:
                 proof.update(summary_sha256=digest(summary), source_sha256=digest(source_lines))
             if proof.get('summary_sha256') != digest(summary) or proof.get('source_sha256') != digest(source_lines):
                 review['source_links'] = []
                 review['structured']['verification']['processing_complete'] = False
                 review['llm_usage'] = {**review.get('llm_usage', {}), 'processing_complete': False}
+                if gemma_prose:
+                    proof.update(review_complete=False, review_status='stale')
+                    review['llm_usage'].update(review_complete=False, review_status='stale', review_required=True)
                 review['llm_usage'].pop('original_line_indices', None)
                 review['review_warnings'] = [*[w for w in review.get('review_warnings', []) if w.get('kind') != 'verification_required'], {
                     'kind': 'verification_required', 'severity': 'warning', 'line_indices': [], 'excerpt': '',
@@ -2597,6 +2640,8 @@ def _run_summary_job(summary_job_id: str) -> None:
             with work_slot(LLM_WORK_LOCK):
                 result = summarize_segment(title, text, model=refs.get("model"),
                     system_prompt=refs.get("system_prompt"),
+                    summary_style=refs.get("summary_style"),
+                    custom_summary_prompt=refs.get("custom_summary_prompt"),
                     processing_mode=refs.get("processing_mode", "slow"),
                     meeting_context=meeting_context_from_transcript(transcript),
                     source_lines=[format_line_for_summary(line, names) for line in lines])
@@ -2639,8 +2684,10 @@ def _run_summary_job(summary_job_id: str) -> None:
             finalize_summary_job_cancellation(summary_job_id, job)
             return
         except Exception as exc:
-            durable.raise_if_transient(exc)
             # Retain successful TOPs and continue the same serial job after a failure.
+            partial = getattr(exc, 'partial_result', None)
+            if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
+                durable.raise_if_transient(exc)
             message = str(exc) if isinstance(exc, SummaryJobInputChanged) else safe_exception_label(exc)
             outcomes[top_id] = {"status": "failed", "error": message}
             def mark_failed(latest):
@@ -2652,6 +2699,23 @@ def _run_summary_job(summary_job_id: str) -> None:
                 if state.get("status") not in {"queued", "running"}:
                     return False  # A manual edit already established a newer state.
                 state.update(status="failed", updated_at=time.time())
+                partial = getattr(exc, 'partial_result', None)
+                if partial and partial.structured and not isinstance(exc, SummaryJobInputChanged):
+                    # Retain a newly generated draft only while its original input
+                    # is still current; never overwrite a concurrent manual edit.
+                    if (current_summary_input(latest, target)[1] != input_hash or
+                            (refs.get('edit_fingerprints', {}).get(top_id) and
+                             summary_edit_fingerprint(latest, target) != refs['edit_fingerprints'][top_id])):
+                        return False
+                    preserve_assignment_questions(partial, latest, source_indices)
+                    partial_review = build_summary_review(structured=partial.structured, summary=partial.summary,
+                        lines=[{**line, 'speaker': names.get(line['speaker'], line['speaker'])} for line in lines])
+                    latest.setdefault('summaries', {})[target] = partial.summary
+                    latest.setdefault('summary_reviews', {})[target] = dict(
+                        structured=partial.structured.to_dict(), source_links=[],
+                        review_warnings=[w.to_dict() for w in partial_review.warnings],
+                        llm_usage={**partial.llm_usage, 'original_line_indices': source_indices},
+                        error=message)
                 review = latest.setdefault("summary_reviews", {}).setdefault(target, {})
                 review["review_warnings"] = [*review.get("review_warnings", []), {
                     "kind": "summary_failed", "message": message, "severity": "error",
@@ -2695,7 +2759,7 @@ def save_pipeline_session(
     publication_key = "pipeline:draft:" + draft_phase if draft_phase else "pipeline:published"
     if ctx and durable.published(publication_key):
         return session
-    state = dict(session)
+    state = dict(ctx.payload.get('session_snapshot') or session) if ctx else dict(session)
     if enforce_top_order is not None:
         state["enforce_top_order"] = enforce_top_order
     if processing_mode is not None:
@@ -2740,6 +2804,11 @@ def save_pipeline_session(
         state["current_step"] = current_step
     if skipped_assignment is not None:
         state["skipped_assignment"] = skipped_assignment
+    if ctx and ctx.payload.get('legacy_snapshot'):
+        options = ctx.payload['legacy_snapshot'].get('result_refs', {}).get('options', {})
+        for key in ('summary_style', 'custom_summary_prompt'):
+            if key in options:
+                state[key] = options[key]
     state.setdefault("speaker_names", {})
     state.setdefault("tops", [])
     state.setdefault("top_ids", [])
@@ -2749,6 +2818,16 @@ def save_pipeline_session(
     state.setdefault("summary_states", {})
     state.setdefault("export_metadata", {})
     state.setdefault("skipped_assignment", False)
+    if ctx and summaries is not None:
+        # Preserve an independently reviewable result before the revision fence.
+        # Use the job's original editing state, not concurrent session edits.
+        retained = dict(state)
+        retained['processing_mode'] = ctx.payload['versions']['processing']['mode']
+        retained['enforce_top_order'] = (ctx.payload.get('legacy_snapshot', {}).get('result_refs', {})
+                                       .get('options', {}).get('enforce_top_order', False))
+        result_key = 'pipeline:computed-session:' + durable.hash_value(json.dumps(retained, sort_keys=True))
+        durable.checkpoint(result_key, lambda: retained)
+        save_pipeline_state(ctx.job_id, result_refs={'computed_session_key': result_key})
     with durable.publication(publication_key):
         return save_session(session_id, state,
             expected_revision=ctx.payload.get("session_revision") if ctx else session.get("revision"),
@@ -2792,6 +2871,9 @@ def detect_pipeline_agenda(
     pdf_extraction = options.get("pdf_source_extraction")
     if pdf_extraction:
         save_pipeline_state(pipeline_id, result_refs={"pdf_extraction": pdf_extraction})
+        pdf_incomplete = not pdf_usable(pdf_extraction, options.get('processing_mode', 'slow'))
+        if pdf_incomplete:
+            append_pipeline_warning(pipeline_id, 'Übernommener PDF-Entwurf benötigt weiterhin manuelle Prüfung.')
         pdf_metadata = pdf_extraction["metadata"]
         if not agenda_tops:
             agenda_tops = pdf_extraction["tops"]
@@ -2902,6 +2984,13 @@ def summarize_pipeline_segments(
     summaries = {int(k): v for k, v in (prior.get("summaries") or {}).items()}
     summary_reviews = {int(k): v for k, v in (prior.get("summary_reviews") or {}).items()}
     model = options.get("summary_model") or options.get("model")
+    from summarize import get_llm_config
+    from gemma_summary import VERSION as gemma_version
+    config = get_llm_config(model).with_summary_style(options.get('summary_style'), options.get('custom_summary_prompt'))
+    summary_contract = (gemma_version + ':' + config.for_protocol().public_snapshot()['config_id']
+                        if config.is_gemma_prose else 'structured')
+    if summary_contract != 'structured' and prior.get('summary_contract') != summary_contract:
+        summaries, summary_reviews = {}, {}
     system_prompt = options.get("summary_system_prompt")
     if system_prompt is None:
         system_prompt = options.get("system_prompt")
@@ -2917,6 +3006,8 @@ def summarize_pipeline_segments(
                     source_lines=[format_line_for_summary(line, speaker_names) for line in transcript],
                     model=model,
                     system_prompt=system_prompt,
+                    summary_style=options.get("summary_style"),
+                    custom_summary_prompt=options.get("custom_summary_prompt"),
                     processing_mode=options.get("processing_mode", "slow"),
                 )
             review = build_summary_review(
@@ -2942,7 +3033,9 @@ def summarize_pipeline_segments(
         except LLMCancelledError:
             raise
         except Exception as exc:
-            durable.raise_if_transient(exc)
+            partial = getattr(exc, 'partial_result', None)
+            if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
+                durable.raise_if_transient(exc)
             if isinstance(exc, LLMCallError):
                 message = str(exc)
             else:
@@ -3010,6 +3103,8 @@ def summarize_pipeline_segments(
                     source_lines=[format_line_for_summary(line, speaker_names) for line in lines],
                     model=model,
                     system_prompt=system_prompt,
+                    summary_style=options.get("summary_style"),
+                    custom_summary_prompt=options.get("custom_summary_prompt"),
                     processing_mode=options.get("processing_mode", "slow"),
                     meeting_context=meeting_context_from_transcript(transcript),
                 )
@@ -3035,7 +3130,9 @@ def summarize_pipeline_segments(
         except LLMCancelledError:
             raise
         except Exception as exc:
-            durable.raise_if_transient(exc)
+            partial = getattr(exc, 'partial_result', None)
+            if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
+                durable.raise_if_transient(exc)
             if isinstance(exc, LLMCallError):
                 message = str(exc)
             else:
@@ -3071,6 +3168,7 @@ def summarize_pipeline_segments(
 
         save_pipeline_state(pipeline_id, result_refs={
             "summary_progress": {"completed_tops": top_index + 1, "total_tops": len(tops),
+                                 "summary_contract": summary_contract,
                                  "summaries": summaries, "summary_reviews": summary_reviews}})
 
     return summaries, summary_reviews
@@ -3217,7 +3315,14 @@ def _run_pipeline_job(
             summaries, summary_reviews = {}, {}
             append_pipeline_warning(pipeline_id, 'Keine belegte Agenda; keine automatische Ersatz-Zusammenfassung.')
         else:
-            summaries, summary_reviews = durable.draft_checkpoint("pipeline:summaries", lambda: summarize_pipeline_segments(
+            from summarize import get_llm_config
+            from gemma_summary import VERSION as gemma_version
+            summary_step = 'pipeline:summaries'
+            config = get_llm_config(options.get('summary_model') or options.get('model')).with_summary_style(
+                options.get('summary_style'), options.get('custom_summary_prompt'))
+            if config.is_gemma_prose:
+                summary_step += ':' + gemma_version + ':' + config.for_protocol().public_snapshot()['config_id']
+            summaries, summary_reviews = durable.draft_checkpoint(summary_step, lambda: summarize_pipeline_segments(
                 pipeline_id, transcript=transcript, tops=tops, assignments=assignments, options=options,
                 source_session=dict(transcript=transcript, tops=tops, top_ids=top_ids,
                                     assignments=assignments, agenda_proposals=agenda_proposals)),
@@ -3406,6 +3511,8 @@ async def start_pipeline(
     model: Optional[str] = Form(None),
     system_prompt: Optional[str] = Form(None),
     summary_system_prompt: Optional[str] = Form(None),
+    summary_style: Optional[Literal["gemma4-lora", "gemma4-custom"]] = Form(None),
+    custom_summary_prompt: Optional[str] = Form(None),
     agenda_system_prompt: Optional[str] = Form(None),
     agenda_use_llm: Optional[bool] = Form(None),
     agenda_fresh: bool = Form(False),
@@ -3453,10 +3560,11 @@ async def start_pipeline(
         if not source_job or source_job['kind'] != 'pdf' or source_job['state'] not in {'completed', 'review_required'}:
             raise HTTPException(422, 'PDF-Quelljob ist nicht vollständig abgeschlossen')
         source_extraction = source_job.get('result')
-        if not pdf_usable(source_extraction, effective_mode) or source_extraction.get('contract_version') not in {'page-evidence-v3', 'fast-extraction-v1'}:
+        if not pdf_reviewable(source_extraction, effective_mode) or source_extraction.get('contract_version') not in {'page-evidence-v3', 'fast-extraction-v1'}:
             raise HTTPException(422, 'PDF-Quelljob hat keine vollständige visuelle Quellenprüfung nach aktuellem Vertrag; neue Auswertung erforderlich')
         source_hash = (source_extraction.get('document') or {}).get('sha256')
-        if not source_hash or not source_extraction.get('items') or (source_extraction.get('processing_mode', 'slow') == 'slow' and not source_extraction.get('audits')) or not any(
+        if not source_hash or not source_extraction.get('items') or (source_extraction.get('processing_mode', 'slow') == 'slow'
+                and source_extraction.get('processing_complete') and not source_extraction.get('audits')) or not any(
             doc['sha256'] == source_hash for doc in source_job.get('documents') or []
         ):
             raise HTTPException(422, 'PDF-Quelljob hat keine vollständige visuelle Quellenprüfung; neue Auswertung erforderlich')
@@ -3467,7 +3575,7 @@ async def start_pipeline(
     pipeline_id = str(uuid.uuid4())
     transcription_job_id = str(uuid.uuid4())
     effective_session_id = session_id or str(uuid.uuid4())
-    parsed_options.pop("pdf_source_extraction", None)  # only verified server-owned provenance
+    parsed_options.pop("pdf_source_extraction", None)  # only server-owned provenance
     if agenda_fresh:
         parsed_options['agenda_cache_namespace'] = str(uuid.uuid4())
     if agenda_use_llm is not None:
@@ -3476,8 +3584,11 @@ async def start_pipeline(
         parsed_options["model"] = model
     if system_prompt:
         parsed_options["system_prompt"] = system_prompt
+    if summary_style is not None:
+        parsed_options["summary_style"] = summary_style
     form = await request.form()
     for key, prompt in (
+        ("custom_summary_prompt", custom_summary_prompt),
         ("summary_system_prompt", summary_system_prompt),
         ("agenda_system_prompt", agenda_system_prompt),
         ("pdf_system_prompt", pdf_system_prompt),
@@ -3634,7 +3745,7 @@ async def get_pipeline_result(pipeline_id: str):
         for observation in load_speaker_observations(session_id=session_id)
     ]
     status = build_pipeline_status_response(pipeline_job)
-    agenda_detection = build_pipeline_agenda_detection_response(
+    agenda_detection = None if status.retained_result_available else build_pipeline_agenda_detection_response(
         _pipeline_refs(pipeline_job).get("agenda"),
         session_response,
     )
@@ -3647,6 +3758,37 @@ async def get_pipeline_result(pipeline_id: str):
         warnings=status.warnings,
         agenda_detection=agenda_detection,
     )
+
+
+@app.post('/api/pipeline/{pipeline_id}/draft-session', response_model=SessionResponse)
+async def open_retained_pipeline_result(pipeline_id: str):
+    pipeline = load_pipeline_job(pipeline_id)
+    if pipeline is None:
+        raise HTTPException(404, 'Pipeline nicht gefunden')
+    if not _pipeline_refs(pipeline).get('retained_result_available'):
+        raise HTTPException(409, 'Kein separates Verarbeitungsergebnis vorhanden')
+    work = durable.load(pipeline_id)
+    if not work or work['state'] not in {'completed', 'review_required'}:
+        raise HTTPException(409, 'Verarbeitungsergebnis ist noch nicht verfügbar')
+    try:
+        state = durable.saved_checkpoint(pipeline_id, _pipeline_refs(pipeline).get('computed_session_key'))
+    except ValueError:
+        raise HTTPException(409, 'Gespeichertes Verarbeitungsergebnis ist beschädigt')
+    if state is None:
+        raise HTTPException(404, 'Gespeichertes Verarbeitungsergebnis fehlt')
+    # A repeat click opens the same copy, including subsequent manual edits.
+    session_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'pipeline-result:' + pipeline_id))
+    session = load_session(session_id)
+    if session is None:
+        state = {**state, 'session_id': session_id, 'current_step': 2}
+        if not state.get('tops'):
+            for summary in (state.get('summary_states') or {}).values():
+                summary['top_id'] = f'whole-session:{session_id}'
+        try:
+            session = save_session(session_id, state, expected_revision=0)
+        except SessionConflictError:
+            session = load_session(session_id)
+    return build_session_response(session)
 
 
 @app.get("/api/sessions", response_model=SessionListResponse)
@@ -3723,7 +3865,7 @@ def reconcile_pdf_source(request, state, existing, session_id):
         source = durable.load(source_id)
         if (not source or source['kind'] != 'pdf' or source['state'] not in {'completed', 'review_required'}
                 or source['payload'].get('session_id') not in {None, session_id}
-                or not pdf_usable(source.get('result'), state.get('processing_mode', 'slow'))):
+                or not pdf_reviewable(source.get('result'), state.get('processing_mode', 'slow'))):
             raise HTTPException(422, 'PDF-Auswertung ist für diese Sitzung noch nicht verwendbar')
 
 
@@ -3740,6 +3882,9 @@ async def create_or_save_session(request: SessionSaveRequest):
     state = model_to_dict(request)
     state["session_id"] = session_id
     existing = load_session(session_id)
+    for key in ("summary_style", "custom_summary_prompt"):
+        if existing and key not in request.model_fields_set:
+            state[key] = existing.get(key)
     if existing and "enforce_top_order" not in request.model_fields_set:
         state["enforce_top_order"] = existing.get("enforce_top_order", False)
     if existing and state["enforce_top_order"] != existing.get("enforce_top_order", False):
@@ -3768,6 +3913,9 @@ async def save_existing_session(session_id: str, request: SessionSaveRequest):
     state = model_to_dict(request)
     state["session_id"] = session_id
     existing = load_session(session_id)
+    for key in ("summary_style", "custom_summary_prompt"):
+        if existing and key not in request.model_fields_set:
+            state[key] = existing.get(key)
     if existing and "enforce_top_order" not in request.model_fields_set:
         state["enforce_top_order"] = existing.get("enforce_top_order", False)
     if existing and state["enforce_top_order"] != existing.get("enforce_top_order", False):
@@ -3934,6 +4082,8 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
                 "model": request.model,
                 "processing_mode": session.get("processing_mode", "slow"),
                 "system_prompt": request.system_prompt,
+                "summary_style": request.summary_style,
+                "custom_summary_prompt": request.custom_summary_prompt,
                 "session_revision": saved.get("revision"),
                 "input_snapshot": saved,
             },
@@ -3989,8 +4139,8 @@ async def accept_existing_summary(
     if top_id not in effective_ids:
         raise HTTPException(status_code=404, detail="TOP nicht gefunden")
     top_index = effective_ids.index(top_id)
-    summary = str((session.get("summaries") or {}).get(top_index) or "").strip()
-    if not summary:
+    summary = str((session.get("summaries") or {}).get(top_index) or "")
+    if not summary.strip():
         raise HTTPException(status_code=400, detail="Keine Zusammenfassung zum Übernehmen")
 
     snapshot, input_hash = current_summary_input(session, top_index)
@@ -4381,6 +4531,7 @@ async def export_protocol_endpoint(request: ProtocolExportRequest):
                                 questions.append(dict(kind='assignment_open',message=message,line_indices=[row['index']]))
                 review['review_warnings'] = questions
     if any((review.get('llm_usage') or {}).get('processing_complete') is False
+           and (review.get('structured') or {}).get('verification', {}).get('source_contract') != 'gemma-prose-review-v1'
            for review in request.summary_reviews.values() if isinstance(review, dict)):
         raise HTTPException(409, 'Technisch unvollständige Zusammenfassungen sind nicht exportierbar')
     export_format = request.format.lower().strip()
@@ -4641,10 +4792,18 @@ async def generate_summary(request: SummarizeRequest):
                     source_lines=[f"{line.speaker}: {line.text}" for line in request.lines],
                     model=request.model,
                     system_prompt=request.system_prompt,
+                    summary_style=request.summary_style,
+                    custom_summary_prompt=request.custom_summary_prompt,
                     processing_mode=request.processing_mode,
                 )
 
-        result = await loop.run_in_executor(None, run_guarded_summary)
+        try:
+            result = await loop.run_in_executor(None, run_guarded_summary)
+        except Exception as exc:
+            partial = getattr(exc, 'partial_result', None)
+            if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
+                raise
+            result = partial  # Explicit incomplete flags and warning accompany the retained draft.
         review = build_summary_review(
             structured=result.structured,
             summary=result.summary,
@@ -5067,7 +5226,18 @@ def run_durable_job(job):
             return result, 'failed'
         return result, 'review_required' if (result.get('llm') or {}).get('review_required', True) or result.get('uncertain_count') or None in result.get('assignments', []) else 'completed'
     if job['kind'] == 'pipeline':
-        run_pipeline_job(job['job_id'], app.state.models)
+        try:
+            run_pipeline_job(job['job_id'], app.state.models)
+        except SessionConflictError:
+            result_key = _pipeline_refs(load_pipeline_job(job['job_id'])).get('computed_session_key')
+            if durable.saved_checkpoint(job['job_id'], result_key) is None:
+                raise
+            append_pipeline_warning(job['job_id'], 'Die Sitzung wurde während der Verarbeitung geändert. '
+                'Das berechnete Ergebnis kann als eigene Sitzung geöffnet werden; Ihre Änderungen bleiben erhalten.')
+            save_pipeline_state(job['job_id'], status=PIPELINE_STATUS_COMPLETED,
+                stage=PIPELINE_STAGE_READY_FOR_REVIEW, progress=100, error=None,
+                result_refs={'retained_result_available': True, 'publication_status': 'conflict_draft',
+                             'ready_for_review': True, 'processing_complete': False})
         old = load_pipeline_job(job['job_id'])
         refs = _pipeline_refs(old)
         state = old['status']

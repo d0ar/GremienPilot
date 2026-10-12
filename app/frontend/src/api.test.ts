@@ -4,6 +4,7 @@ import {
   archiveSpeakerProfile,
   backfillSpeakerEmbeddings,
   getPipelineResult,
+  openRetainedPipelineResult,
   pollPipeline,
   pollSummaryJob,
   pollModelJob,
@@ -24,12 +25,20 @@ import {
   loadSession,
   saveSession,
   startPipeline,
+  startSummaryJob,
   startTranscription,
   unassignSpeakerObservation,
   updateSpeakerProfile,
 } from './api';
 
 describe('api session client', () => {
+  it('opens a retained pipeline result as a separate session', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ session_id: 'copy' }) });
+    vi.stubGlobal('fetch', fetchMock);
+    expect((await openRetainedPipelineResult('pipeline-1')).session_id).toBe('copy');
+    expect(fetchMock).toHaveBeenCalledWith('/api/pipeline/pipeline-1/draft-session', { method: 'POST' });
+  });
+
   it('sends Fast to every standalone generation endpoint and accepts its unreviewed PDF', async () => {
     const pdf = { tops: ['Haushalt'], metadata: {}, processing_complete: true,
       processing_mode: 'fast', review_status: 'skipped', review_required: true };
@@ -845,4 +854,20 @@ it('does not accept an unverified PDF result', async () => {
   }) }));
   await expect(extractAgendaDataFromPDF(new File(['pdf'], 'agenda.pdf')))
     .rejects.toThrow(/nicht vollständig geprüft/);
+});
+
+
+it('sends Gemma preferences for pipeline, TOP jobs and direct generation', async () => {
+  const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ summary: 'Text' }) });
+  vi.stubGlobal('fetch', fetchMock);
+  const preferences = { summaryStyle: 'gemma4-custom' as const, customSummaryPrompt: 'Meine Tabelle' };
+  await startPipeline(new File(['audio'], 'meeting.mp3'), preferences);
+  const form = fetchMock.mock.calls[0]![1].body as FormData;
+  expect(form.get('summary_style')).toBe('gemma4-custom');
+  expect(form.get('custom_summary_prompt')).toBe('Meine Tabelle');
+  await startSummaryJob('session', { topIds: ['a'], ...preferences });
+  await generateSummary('TOP 1', [{ speaker: 'A', text: 'Beitrag', start: 0, end: 1 }], preferences);
+  for (const [, request] of fetchMock.mock.calls.slice(1)) {
+    expect(JSON.parse(request.body)).toMatchObject({ summary_style: 'gemma4-custom', custom_summary_prompt: 'Meine Tabelle' });
+  }
 });

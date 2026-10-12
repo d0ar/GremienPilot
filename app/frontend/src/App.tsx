@@ -20,6 +20,7 @@ import {
   pollPipeline,
   getPipelineStatus,
   getPipelineResult,
+  openRetainedPipelineResult,
   cancelPipeline,
   startSummaryJob,
   pollSummaryJob,
@@ -29,7 +30,7 @@ import {
   detectAgenda,
   reextractSessionPDF,
   pollModelJob,
-  pdfResultUsable,
+  pdfResultReviewable,
   type ModelJob,
   saveSession,
   loadSession,
@@ -442,6 +443,7 @@ export default function App() {
   const [pipelineId, setPipelineId] = useState<string | null>(null);
   const [pipelineJob, setPipelineJob] = useState<PipelineJob | null>(null);
   const [pipelineNotice, setPipelineNotice] = useState<string | null>(null);
+  const [openingRetainedResult, setOpeningRetainedResult] = useState(false);
   const [directProtocolAvailable, setDirectProtocolAvailable] = useState(false);
   const [restoreCandidate, setRestoreCandidate] = useState<{
     sessionId: string | null;
@@ -532,7 +534,10 @@ export default function App() {
       const saved = localStorage.getItem(LLM_SETTINGS_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        return { model: typeof parsed.model === 'string' ? parsed.model.trim() : '',
+        return { ...DEFAULT_LLM_SETTINGS,
+          summaryStyle: parsed.summaryStyle === 'gemma4-custom' ? 'gemma4-custom' : 'gemma4-lora',
+          customSummaryPrompt: typeof parsed.customSummaryPrompt === 'string' ? parsed.customSummaryPrompt : DEFAULT_LLM_SETTINGS.customSummaryPrompt,
+          model: typeof parsed.model === 'string' ? parsed.model.trim() : '',
           systemPrompt: typeof parsed.systemPrompt === 'string' ? parsed.systemPrompt : DEFAULT_LLM_SETTINGS.systemPrompt };
       }
     } catch (e) {
@@ -559,6 +564,8 @@ export default function App() {
   const buildSessionPayload = useCallback(
     (overrides: Partial<SessionSavePayload> = {}): SessionSavePayload => ({
       pdf_source_job_id: overrides.pdf_source_job_id === undefined ? pdfSourceJobId : overrides.pdf_source_job_id,
+      summary_style: overrides.summary_style ?? llmSettings.summaryStyle,
+      custom_summary_prompt: overrides.custom_summary_prompt ?? llmSettings.customSummaryPrompt,
       processing_mode: overrides.processing_mode ?? processingMode,
       enforce_top_order: overrides.enforce_top_order ?? enforceTopOrder,
       session_id: overrides.session_id ?? sessionId,
@@ -579,6 +586,8 @@ export default function App() {
     }),
     [
       pdfSourceJobId,
+      llmSettings.summaryStyle,
+      llmSettings.customSummaryPrompt,
       processingMode,
       enforceTopOrder,
       agendaProposals,
@@ -606,8 +615,12 @@ export default function App() {
     currentPayloadRef.current = serializeSessionPayload(latestPayloadRef.current);
   }, [buildSessionPayload]);
 
-  const applySession = useCallback((session: SessionResponse | SessionDraft) => {
+  const applySession = useCallback((session: SessionResponse | SessionDraft, preserveSummaryPreferences = false) => {
     summaryBaselineRef.current = session;
+    if (!preserveSummaryPreferences) setLlmSettings(settings => ({ ...settings,
+      summaryStyle: session.summary_style ?? DEFAULT_LLM_SETTINGS.summaryStyle,
+      customSummaryPrompt: session.custom_summary_prompt ?? DEFAULT_LLM_SETTINGS.customSummaryPrompt,
+    }));
     setProcessingMode(session.processing_mode ?? "slow");
     setEnforceTopOrder(session.enforce_top_order ?? false);
     const nextSessionId = session.session_id ?? null;
@@ -686,6 +699,18 @@ export default function App() {
   }, []);
 
   const applyPipelineResult = useCallback((result: PipelineResultResponse) => {
+    if (result.pipeline.retained_result_available) {
+      // Keep the edited session intact; computed assignments belong to the copy.
+      applySession(result.session, activeSessionIdRef.current === result.session.session_id);
+      setPipelineJob(result.pipeline);
+      setPipelineId(null);
+      setIsProcessing(false);
+      setProcessingError(null);
+      setDirectProtocolAvailable(false);
+      setPipelineNotice('Die Sitzung wurde während der Verarbeitung geändert. Das berechnete Ergebnis steht als eigene Sitzung bereit.');
+      localStorage.removeItem(ACTIVE_PIPELINE_KEY);
+      return;
+    }
     const speakerObservations = result.speaker_observations ?? [];
     const suggestedSpeakerNames = applySuggestedSpeakerNames(result.session, speakerObservations);
     const speakerReplacements: Record<string, string> = {};
@@ -719,7 +744,7 @@ export default function App() {
       !hasTechnicalProcessingFailure(sessionWithSuggestedSpeakers, agendaDetectionResult) && hasFreshSessionSummaries(sessionWithSuggestedSpeakers);
     const shouldReviewBeforeProtocol = !fastComplete && (needsReview || needsSpeakerReview);
 
-    applySession(sessionWithSuggestedSpeakers);
+    applySession(sessionWithSuggestedSpeakers, activeSessionIdRef.current === result.session.session_id);
 
     setPipelineJob(completedPipeline);
     setPipelineId(null);
@@ -869,7 +894,10 @@ export default function App() {
 
     if (
       !sessionId ||
+      sessionRevision === null ||
       route.view === "history" ||
+      isRestoringSession ||
+      isLoadingRouteSession ||
       isProcessing ||
       isGeneratingSummary ||
       (summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status)) ||
@@ -956,12 +984,15 @@ export default function App() {
   }, [
     audioUrl,
     buildSessionPayload,
+    isRestoringSession,
+    isLoadingRouteSession,
     isProcessing,
     isGeneratingSummary,
     summaryJob,
     pipelineId,
     route.view,
     sessionId,
+    sessionRevision,
     topIds,
   ]);
 
@@ -1068,6 +1099,10 @@ export default function App() {
       sessionRevisionRef.current = refreshed.revision ?? sessionRevisionRef.current;
       setSessionRevision(sessionRevisionRef.current);
       setProcessingMode(merged.processing_mode ?? "slow");
+      setLlmSettings(settings => ({ ...settings,
+        summaryStyle: merged.summary_style ?? DEFAULT_LLM_SETTINGS.summaryStyle,
+        customSummaryPrompt: merged.custom_summary_prompt ?? DEFAULT_LLM_SETTINGS.customSummaryPrompt,
+      }));
       setEnforceTopOrder(merged.enforce_top_order ?? false);
       setTops(merged.tops);
       setTopIds(merged.top_ids ?? []);
@@ -1117,11 +1152,8 @@ export default function App() {
       if (restoreCandidate.pipelineId) {
         const status = await getPipelineStatus(restoreCandidate.pipelineId);
         setRestoreCandidate(null);
-        if (status.session_id) {
-          setSessionId(status.session_id);
-          activeSessionIdRef.current = status.session_id;
-          localStorage.setItem(ACTIVE_SESSION_KEY, status.session_id);
-        }
+        // Apply the session ID together with its loaded editing state. Setting
+        // it before the result arrives would attach the empty form to this ID.
         setPipelineJob(status);
         if (status.status === "completed") {
           setPipelineId(status.pipeline_id);
@@ -1276,6 +1308,8 @@ export default function App() {
         autoDetectTopsFromPdf: shouldAutoDetectTopsFromPdf,
         model: llmSettings.model,
         summarySystemPrompt: llmSettings.systemPrompt,
+        summaryStyle: llmSettings.summaryStyle,
+        customSummaryPrompt: llmSettings.customSummaryPrompt,
         rememberSpeakers,
         skipAgendaDetection,
       });
@@ -1310,6 +1344,19 @@ export default function App() {
   const handleOpenSession = (targetSessionId: string) => {
     resetSession();
     navigate(`/sessions/${encodeURIComponent(targetSessionId)}`);
+  };
+
+  const handleOpenRetainedResult = async () => {
+    if (!pipelineJob || openingRetainedResult) return;
+    setOpeningRetainedResult(true);
+    try {
+      const result = await openRetainedPipelineResult(pipelineJob.pipeline_id);
+      handleOpenSession(result.session_id);
+    } catch (error) {
+      setPipelineNotice(error instanceof Error ? error.message : 'Verarbeitungsergebnis konnte nicht geöffnet werden');
+    } finally {
+      setOpeningRetainedResult(false);
+    }
   };
 
   const handleReloadCurrentSession = async () => {
@@ -1405,6 +1452,8 @@ export default function App() {
       const started = await startSummaryJob(sessionId, {
         revision,
         topIds: selectedIds,
+        summaryStyle: llmSettings.summaryStyle,
+        customSummaryPrompt: llmSettings.customSummaryPrompt,
         model: llmSettings.model,
         systemPrompt: tops.filter((top) => top.trim()).length === 0
           ? GENERIC_SUMMARY_PROMPT
@@ -1556,7 +1605,7 @@ export default function App() {
       const result = resume ? await pollModelJob<PdfAgendaExtractionResult>(resume.job_id, controller.signal, onStatus)
         : await reextractSessionPDF(sessionId, { model: llmSettings.model, processingMode, signal: controller.signal, onStatus });
       if (requestId !== pdfRequestRef.current) return;
-      if (!pdfResultUsable(result, processingMode) || !result.tops.length) {
+      if (!pdfResultReviewable(result, processingMode) || !result.tops.length) {
         throw new Error('Die PDF-Extraktion ist unvollständig oder passt nicht zum gewählten Modus. Die bisherige TOP-Liste bleibt erhalten.');
       }
       setPdfCandidate(result);
@@ -1625,7 +1674,7 @@ export default function App() {
   };
 
   const handleApplyPdfCandidate = () => {
-    if (!pdfCandidate || !pdfResultUsable(pdfCandidate, processingMode) || isDetectingAgenda || isExtractingPdf) return;
+    if (!pdfCandidate || !pdfResultReviewable(pdfCandidate, processingMode) || isDetectingAgenda || isExtractingPdf) return;
     const sourceId = pdfCandidate.document?.job_id ?? pdfJob?.job_id;
     if (!sourceId) {
       setPdfExtractionError('Die neue PDF-Auswertung hat keine gespeicherte Quellenreferenz. Bitte erneut extrahieren.');
@@ -1791,10 +1840,16 @@ export default function App() {
 
       {!isProcessing && <StepIndicator currentStep={currentStep} />}
 
-      {!isProcessing && pipelineNotice && (
+      {!isProcessing && (pipelineNotice || pipelineJob?.retained_result_available) && (
         <div className="mb-4 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <span>{pipelineNotice}</span>
+            <span>{pipelineNotice || 'Ein separat gespeichertes Verarbeitungsergebnis steht zur Prüfung bereit.'}</span>
+            {pipelineJob?.retained_result_available && (
+              <button type="button" onClick={handleOpenRetainedResult} disabled={openingRetainedResult}
+                className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50">
+                {openingRetainedResult ? 'Ergebnis wird geöffnet…' : 'Ergebnis als eigene Sitzung öffnen'}
+              </button>
+            )}
             {directProtocolAvailable && hasFreshSummariesInState &&
               agendaDetection && !agendaDetectionStale && !hasAgendaUncertainty(agendaDetection) && (
               <button
@@ -1883,7 +1938,7 @@ export default function App() {
           onExtractPdf={() => void handleExtractPdf()}
           onCancelPdf={() => pdfAbortRef.current?.abort()}
           pdfCandidate={pdfCandidate}
-          onApplyPdfCandidate={pdfCandidate && pdfResultUsable(pdfCandidate, processingMode) ? handleApplyPdfCandidate : undefined}
+          onApplyPdfCandidate={pdfCandidate && pdfResultReviewable(pdfCandidate, processingMode) ? handleApplyPdfCandidate : undefined}
           onTranscriptStructureChange={handleTranscriptStructureChange}
           audioUrl={audioUrl ?? undefined}
           speakerNames={speakerNames}
@@ -1906,7 +1961,18 @@ export default function App() {
             const states = { ...effectiveSummaryStates };
             Object.keys(next).map(Number).forEach(index => {
               if (next[index] === summaries[index]) return;
-              delete reviews[index]; // Generated evidence no longer describes manual text.
+              if (reviews[index]?.structured?.verification?.source_contract === 'gemma-prose-review-v1') {
+                const previous = reviews[index]!;
+                reviews[index] = { ...previous, source_links: [],
+                  structured: { ...previous.structured!, protocol_text: next[index],
+                    verification: { ...previous.structured!.verification, review_complete: false, review_status: 'stale' } },
+                  llm_usage: { ...previous.llm_usage, review_complete: false, review_status: 'stale', review_required: true },
+                  review_warnings: [...previous.review_warnings.filter(w => w.kind !== 'verification_required'), {
+                    kind: 'verification_required', severity: 'warning', line_indices: [], excerpt: '',
+                    message: 'Text bearbeitet; Prüfhinweise beziehen sich auf die frühere Fassung.' }] };
+              } else {
+                delete reviews[index]; // Generated evidence no longer describes manual text.
+              }
               if (states[index]) states[index] = { ...states[index]!, status: 'ready', origin: 'manual' };
             });
             setSummaries(next);

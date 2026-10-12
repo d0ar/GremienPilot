@@ -4,6 +4,8 @@ import type { Dispatch, SetStateAction } from 'react';
  * Shared type definitions for GremienPilot
  */
 
+export type SummaryStyle = 'gemma4-lora' | 'gemma4-custom';
+
 export type ProcessingMode = 'fast' | 'slow';
 
 // API Types
@@ -108,6 +110,7 @@ export type PipelineStage =
   | string;
 
 export interface PipelineJob {
+  retained_result_available?: boolean;
   execution?: import('./api').ModelJob | null;
   pipeline_id: string;
   session_id?: string | null;
@@ -122,6 +125,8 @@ export interface PipelineJob {
 }
 
 export interface PipelineStartOptions {
+  summaryStyle?: SummaryStyle;
+  customSummaryPrompt?: string;
   enforceTopOrder?: boolean;
   processingMode?: ProcessingMode;
   agendaFresh?: boolean;
@@ -152,6 +157,8 @@ export interface PipelineResultResponse {
 }
 
 export interface SessionSavePayload {
+  summary_style?: SummaryStyle | null;
+  custom_summary_prompt?: string | null;
   enforce_top_order?: boolean;
   pdf_source_job_id?: string | null;
   processing_mode?: ProcessingMode;
@@ -233,6 +240,9 @@ export interface SummarizeRequest {
 }
 
 export interface StructuredSummary {
+  protocol_text?: string | null;
+  verification?: Record<string, unknown>;
+  review_questions?: { kind: string; question: string; excerpts?: string[] }[];
   discussion: string[];
   decisions: string[];
   votes: string[];
@@ -314,6 +324,7 @@ export interface SummaryState {
 }
 
 export interface SummaryJob {
+  llm_progress?: { phase?: string };
   execution?: import('./api').ModelJob | null;
   summary_job_id: string;
   session_id: string;

@@ -307,6 +307,50 @@ describe('App pipeline flow', () => {
     expect(options).not.toHaveProperty('pdfSystemPrompt');
   });
 
+  it('re-enables regeneration once the summary job has finished', async () => {
+    const user = userEvent.setup();
+    const runningSummaryJob: SummaryJob = {
+      summary_job_id: 'summary-job-1',
+      session_id: 'session-1',
+      status: 'processing',
+      progress: 10,
+      current_top: 1,
+      total_tops: 1,
+      top_ids: ['top-1'],
+    };
+    await uploadAndStart(user);
+    expect(await screen.findByText('Der Haushalt wurde serverseitig zusammengefasst.')).toBeInTheDocument();
+
+    // Finish the job only after the running state has rendered, and resolve the
+    // session reloads on a macrotask like a real request. A terminal status
+    // clears the active job id and tears the polling effect down; that must
+    // never leave regeneration disabled until a full page reload.
+    let finishJob: (job: SummaryJob) => void = () => {};
+    vi.mocked(pollSummaryJob).mockImplementation(
+      (_jobId, onStatus) =>
+        new Promise<SummaryJob>((resolve) => {
+          void onStatus?.({ ...runningSummaryJob });
+          finishJob = resolve;
+        })
+    );
+    vi.mocked(loadSession).mockImplementation(
+      () => new Promise((resolve) => { setTimeout(() => resolve(pipelineResult().session), 0); })
+    );
+
+    await user.click(screen.getByRole('button', { name: /^neu generieren$/i }));
+    await user.click(screen.getByRole('button', { name: /verbindlich starten/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^neu generieren$/i })).toBeDisabled();
+    });
+
+    finishJob({ ...runningSummaryJob, status: 'completed', progress: 100 });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^neu generieren$/i })).toBeEnabled();
+    });
+  });
+
   it('restores custom preferences from localStorage for new pipelines', async () => {
     localStorage.setItem('llm-settings', JSON.stringify({ model: '', summaryStyle: 'gemma4-custom', customSummaryPrompt: 'LOCAL_STYLE' }));
     await uploadAndStart();

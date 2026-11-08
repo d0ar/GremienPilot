@@ -431,8 +431,18 @@ export default function App() {
   const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
   const [summaryStates, setSummaryStates] = useState<Record<number, SummaryState>>({});
   const [exportMetadata, setExportMetadata] = useState<ExportMetadata>(DEFAULT_EXPORT_METADATA);
-  const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+  const [isStartingSummaryJob, setIsStartingSummaryJob] = useState(false);
   const [summaryJob, setSummaryJob] = useState<SummaryJob | null>(null);
+  const activeSummaryJobId =
+    summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status)
+      ? summaryJob.summary_job_id
+      : null;
+  // Derived rather than stored: a stored flag stays stuck at true whenever the
+  // polling effect is torn down before it can reset it (e.g. applySession
+  // replacing the job with a terminal one), which leaves every regeneration
+  // button disabled until a full page reload. Only the short window while the
+  // create request is in flight is stored.
+  const isGeneratingSummary = isStartingSummaryJob || activeSummaryJobId !== null;
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const [skippedAssignment, setSkippedAssignment] = useState(false);
@@ -692,7 +702,7 @@ export default function App() {
       ? `Verarbeitung fehlgeschlagen (${session.latest_pipeline.stage}). ${session.latest_pipeline.error ?? ''} Gespeicherte Ergebnisse bleiben erhalten.` : null);
     setDirectProtocolAvailable(false);
     setIsProcessing(false);
-    setIsGeneratingSummary(false);
+    setIsStartingSummaryJob(false);
     setProcessingError(null);
     setProcessingStatus("");
     setProcessingProgress(0);
@@ -824,7 +834,7 @@ export default function App() {
     setSkippedAssignment(false);
     setSkipAgendaDetection(false);
     setAutoDetectTopsFromPdf(true);
-    setIsGeneratingSummary(false);
+    setIsStartingSummaryJob(false);
     setSummaryJob(null);
     setIsProcessing(false);
     setProcessingError(null);
@@ -1078,18 +1088,12 @@ export default function App() {
     };
   }, [applySession, pollPipelineToResult, route.sessionId, route.view]);
 
-  const activeSummaryJobId =
-    summaryJob && ['pending', 'processing', 'cancelling'].includes(summaryJob.status)
-      ? summaryJob.summary_job_id
-      : null;
-
   const [summaryPollAttempt, setSummaryPollAttempt] = useState(0);
   useEffect(() => {
     if (!activeSummaryJobId || !sessionId) return;
     let cancelled = false;
     let retryTimer: number | undefined;
     const controller = new AbortController();
-    setIsGeneratingSummary(true);
     const refresh = async () => {
       const refreshed = await loadSession(sessionId);
       if (cancelled || activeSessionIdRef.current !== sessionId) return;
@@ -1127,7 +1131,6 @@ export default function App() {
         // Keep the effect alive until the final results have been merged.
         await refresh();
         if (cancelled) return;
-        setIsGeneratingSummary(false);
         setSummaryJob(completed);
       })
       .catch((error) => {
@@ -1428,7 +1431,7 @@ export default function App() {
 
   const handleRegenerateSummaries = async (topIndexes: number[]) => {
     if (!sessionId || activeSummaryJobId || isGeneratingSummary || !topIndexes.length) return;
-    setIsGeneratingSummary(true);
+    setIsStartingSummaryJob(true);
     try {
       if (saveTimerRef.current !== null) {
         window.clearTimeout(saveTimerRef.current);
@@ -1466,13 +1469,13 @@ export default function App() {
       setSessionMessage(errorMessage);
       if (error instanceof SessionConflictError) setSessionConflict(errorMessage);
     } finally {
-      setIsGeneratingSummary(false);
+      setIsStartingSummaryJob(false);
     }
   };
 
   const handleAcceptSummary = async (topIndex: number) => {
     if (!sessionId) return;
-    setIsGeneratingSummary(true);
+    setIsStartingSummaryJob(true);
     try {
       if (saveTimerRef.current !== null) {
         window.clearTimeout(saveTimerRef.current);
@@ -1496,7 +1499,7 @@ export default function App() {
       setSessionMessage(message);
       if (error instanceof SessionConflictError) setSessionConflict(message);
     } finally {
-      setIsGeneratingSummary(false);
+      setIsStartingSummaryJob(false);
     }
   };
 

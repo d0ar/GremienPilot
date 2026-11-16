@@ -1,3 +1,4 @@
+import ErrorDetails from './ErrorDetails';
 import { useState, useRef, useEffect, useCallback, type ChangeEvent } from 'react';
 import { exportProtocol } from '../api';
 import type { ExportFormat, ExportMetadata, StructuredSummary, SummaryStepProps, TranscriptLine } from '../types';
@@ -343,6 +344,7 @@ export default function SummaryStep({
                   <div key={id} className="text-red-800">{jobTopTitle(id)}: {outcome.error}</div>
                 ))}
               </div>
+              <ErrorDetails key={summaryJob.summary_job_id} jobId={summaryJob.summary_job_id} />
               <div role="progressbar" aria-label="Gesamtfortschritt" aria-valuemin={0} aria-valuemax={100} aria-valuenow={summaryJob.progress} className="mt-3 h-2 overflow-hidden rounded bg-blue-100">
                 <div className="h-full bg-blue-600 transition-all" style={{ width: `${summaryJob.progress}%` }} />
               </div>

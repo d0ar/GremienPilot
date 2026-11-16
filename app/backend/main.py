@@ -2684,6 +2684,7 @@ def _run_summary_job(summary_job_id: str) -> None:
             finalize_summary_job_cancellation(summary_job_id, job)
             return
         except Exception as exc:
+            durable.record_failure(exc, phase='summary:'+str(current_top_id))
             # Retain successful TOPs and continue the same serial job after a failure.
             partial = getattr(exc, 'partial_result', None)
             if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
@@ -2942,6 +2943,7 @@ def detect_pipeline_agenda(
         raise
     except Exception as exc:
         durable.raise_if_transient(exc)
+        durable.record_failure(exc, phase='agenda_detect')
         message = f"TOP-Erkennung technisch fehlgeschlagen ({safe_exception_label(exc)}); Zuordnung prüfen."
         append_pipeline_warning(pipeline_id, message)
         return agenda_tops, [None] * len(transcript), {
@@ -3033,6 +3035,7 @@ def summarize_pipeline_segments(
         except LLMCancelledError:
             raise
         except Exception as exc:
+            durable.record_failure(exc, phase='summarize')
             partial = getattr(exc, 'partial_result', None)
             if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
                 durable.raise_if_transient(exc)
@@ -3130,6 +3133,7 @@ def summarize_pipeline_segments(
         except LLMCancelledError:
             raise
         except Exception as exc:
+            durable.record_failure(exc, phase='summarize')
             partial = getattr(exc, 'partial_result', None)
             if not partial or partial.structured.verification.get('source_contract') != 'gemma-prose-review-v1':
                 durable.raise_if_transient(exc)
@@ -5282,6 +5286,14 @@ async def model_job_status(job_id: str):
     if job is None:
         raise HTTPException(404, 'Job nicht gefunden')
     return durable.public(job)
+
+
+@app.get('/api/model-jobs/{job_id}/error-details')
+def model_job_error_details(job_id: str):
+    report = durable.error_details(job_id)
+    if report is None:
+        raise HTTPException(404, 'Job nicht gefunden')
+    return report
 
 
 @app.post('/api/model-jobs/{job_id}/cancel')

@@ -652,6 +652,21 @@ export interface ModelJob {
   documents?: { sha256: string; deleted_at?: number | null }[];
 }
 
+export interface JobErrorDetails {
+  schema_version: number;
+  job_id: string;
+  state: string;
+  reports: { truncated: boolean; [key: string]: unknown }[];
+  truncated: boolean;
+  [key: string]: unknown;
+}
+
+export async function getModelJobErrorDetails(jobId: string, signal?: AbortSignal): Promise<JobErrorDetails> {
+  const response = await fetch(`${API_BASE}/api/model-jobs/${encodeURIComponent(jobId)}/error-details`, { signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000) });
+  if (!response.ok) throw new Error(`Fehlerdetails konnten nicht geladen werden (HTTP ${response.status}).`);
+  return response.json();
+}
+
 class ModelJobStatusError extends Error {
   constructor(public status: number) { super(`Jobstatus nicht verfügbar (${status})`); }
 }

@@ -321,6 +321,7 @@ def _call(key, config, prompt, content, schema, validate):
             parsed = schema.model_validate_json(answer['raw']).model_dump()
             return validate(parsed)
         except (ValidationError, ValueError) as exc:
+            durable.record_failure(exc, phase=key, config=config.public_snapshot())
             # Validation errors contain document material; retained privately,
             # never interpolated into HTTP error messages or logs.
             errors.append(str(exc))

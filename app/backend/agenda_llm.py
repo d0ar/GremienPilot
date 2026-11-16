@@ -268,6 +268,7 @@ class Workflow:
                     if isinstance(exc, AgendaValidationError) and code not in self.usage.validation_reasons:
                         self.usage.validation_reasons.append(code)
                     last = exc
+                    durable.record_failure(exc, phase=phase, config=self.config.public_snapshot())
                     durable.artifact(step, 'technical_diagnostic', {'phase': phase, 'attempt': attempt, 'code': code})
                     if isinstance(exc, IncompleteAgendaStates):
                         durable.artifact(step, 'incomplete_draft', {'phase': phase,
@@ -918,6 +919,7 @@ class Workflow:
                 return {**self.run_details(role, context, agenda, reconstruction, start, middle, opinions, depth+1),
                         **self.run_details(role, context, agenda, reconstruction, middle+1, end, opinions, depth+1)}
             code = str(exc) if isinstance(exc, AgendaValidationError) else getattr(exc, 'public_message', type(exc).__name__)
+            durable.record_failure(exc, phase=role)
             for i in range(start, end+1):
                 self.failures[(role, i)] = code
             return {}
@@ -976,6 +978,7 @@ def classify_ordered_fast(work, agenda, usage):
                 windows.extendleft([(middle+1, end), (start, middle)])
                 continue
             code = str(exc) if isinstance(exc, AgendaValidationError) else getattr(exc, 'public_message', type(exc).__name__)
+            durable.record_failure(exc, phase='fast:detail')
             for i in range(start, end+1):
                 work.failures[('fast:detail', i)] = code
             output = {}
@@ -1183,6 +1186,7 @@ def classify(transcript, tops, usage, model=None, system_prompt=None, progress_c
     except LLMCancelledError:
         raise
     except Exception as exc:
+        durable.record_failure(exc, phase='agenda')
         code = str(exc) if isinstance(exc, AgendaValidationError) else getattr(exc, 'public_message', type(exc).__name__)
         if code not in usage.failure_reasons:
             usage.failure_reasons.append(code)

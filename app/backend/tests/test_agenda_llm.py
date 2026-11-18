@@ -189,7 +189,7 @@ def test_long_transcript_all_originals_read_twice_and_context_retained(agenda_mo
     assert result.llm.provenance['context_archive']
 
 
-@pytest.mark.parametrize('mode,phase', [('fast', 'fast:discover'), ('slow', 'primary:discover')])
+@pytest.mark.parametrize('mode,phase', [('fast', 'fast:detail'), ('slow', 'primary:discover')])
 def test_missing_provider_model_explains_assignment_failure(agenda_model, mode, phase):
     from llm_transport import ProviderError
     agenda_model.overrides[phase] = ProviderError('private provider body', 404)
@@ -240,6 +240,10 @@ def test_discovery_request_distinguishes_additions_from_full_inventory(agenda_mo
         use_llm=True, processing_mode=mode)
     assert result.llm.processing_complete
     requests = [(b,r) for b,r in agenda_model.calls if b['phase'].endswith(':discover')]
+    if mode == 'fast' and known:
+        assert not requests and result.tops == ['1 Haushalt']
+        assert all(b['phase']=='fast:detail' for b,_ in agenda_model.calls)
+        return
     assert requests
     for body, request in requests:
         assert body['inventory_task'] == ('additional_topics_only' if known else 'full_inventory')

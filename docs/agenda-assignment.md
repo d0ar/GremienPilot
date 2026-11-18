@@ -4,6 +4,27 @@ Die folgenden Prüfabläufe beschreiben **Slow**, den Standardmodus. **Fast** nu
 einen verkürzten Ablauf ohne unabhängige Inhaltsprüfung; Unterschiede und
 Ergebnisstatus stehen unter [Verarbeitungsmodi](processing-modes.md).
 
+## FAST mit vorhandener TOP-Liste
+
+Mit einer vorgegebenen Liste, etwa aus der Einladung, verarbeitet FAST direkt
+begrenzte Originaltextfenster mit höchstens 80 Zielzeilen. Die vorhandene TOP-Liste
+bleibt erhalten; es gibt keine vorgeschaltete Agenda-Ergänzung, globale
+Verlaufsrekonstruktion oder modellgesteuerte Quellenabrufe. Der TOP-Status fasst
+die tatsächlichen Zuordnungen als behandelt beziehungsweise nicht belegt zusammen.
+
+Ohne feste Reihenfolge bleiben in jedem Fenster alle TOPs auswählbar, einschließlich
+vorgezogener Punkte, Rücksprünge und Wiederaufnahmen. Benachbarte Originalzeilen
+helfen als Kontext. Passt das Fenster nicht ins Budget, entfällt zuerst dieser
+optionale Kontext; danach wird der Zielbereich geteilt. Die vollständigen
+Originaltexte jeder Zielzeile bleiben erhalten. Bei einer einzelnen zu großen
+Zeile bleibt eine ausdrücklich technische Lücke statt einer geratenen Zuordnung.
+
+Mit „Feste TOP-Reihenfolge erzwingen“ gilt weiterhin der sequenzielle Ablauf mit
+seinen Belegprüfungen für Grenzen und Fortsetzungen. Ohne vorgegebene TOP-Liste
+bleibt die bisherige FAST-Agenda-Ermittlung erhalten. SLOW bleibt unverändert.
+FAST ist in beiden Varianten ein ungeprüfter Vorschlag; technische Vollständigkeit
+belegt keine fachlich richtige Modellentscheidung.
+
 ## Erneute Verarbeitung im Editor
 
 Zwei getrennte Aktionen verwenden den gewählten Sitzungsmodus:

@@ -73,7 +73,7 @@ def test_worker_captures_unhandled_runtime_error():
 
 
 def test_fast_swallowed_failure_is_available_in_frontend_report(agenda_model):
-    agenda_model.overrides['fast:discover']=RuntimeError('Concrete FAST cause')
+    agenda_model.overrides['fast:detail']=RuntimeError('Concrete FAST cause')
     with TestClient(main.app) as client:
         response=client.post('/api/agenda-detection/jobs',json=dict(processing_mode='fast',use_llm=True,
             tops=['Haushalt'],transcript=[dict(line_id='line-1',speaker='S',text='Beratung.',start=0,end=1)]))
@@ -84,7 +84,7 @@ def test_fast_swallowed_failure_is_available_in_frontend_report(agenda_model):
         report=client.get('/api/model-jobs/'+jid+'/error-details').json()
     assert result['state']=='failed'
     assert 'Concrete FAST cause' in json.dumps(report)
-    assert any(r['phase']=='fast:discover' for r in report['reports'])
+    assert any(r['phase']=='fast:detail' for r in report['reports'])
 
 
 def test_older_job_has_clear_fallback_without_invented_stacktrace():

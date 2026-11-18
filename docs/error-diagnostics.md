@@ -36,3 +36,19 @@ verkettete Exceptions mit jeweils 40 Stackframes und 12.000 Zeichen Meldung
 aufgenommen. Begrenzungen werden ausdrücklich mit `truncated` gekennzeichnet.
 Der Bereich bleibt ein Fehlerbericht, kein allgemeiner Export sämtlicher
 Backendlogs oder aller Modellantworten.
+
+## Technische Lücken in der TOP-Zuordnung
+
+Technisch nicht verarbeitete Zeilen werden zusätzlich oben im Zuordnungseditor
+als rote Fehlermeldung angezeigt. Anzahl und erste Fehlerursache bleiben sichtbar,
+auch wenn der übergeordnete Auftrag nur einen Prüfentwurf statt eines Abbruchs
+meldet. Fachlich unzugeordnete Zeilen lösen diese technische Fehlermeldung nicht aus.
+Veraltete Vorschläge und eine gerade laufende Neuberechnung werden dabei nicht
+als aktueller Fehler angezeigt.
+
+`invalid_source_response` bezeichnet eine ungültige Antwortstruktur im bisherigen
+Quellenprotokoll (Ergebnis oder Quellenanforderung). Scheitert damit eine globale
+Vorbereitungsphase, erhalten alle noch unverarbeiteten Zeilen denselben Fehlercode.
+Die direkte FAST-Zuordnung mit vorhandener TOP-Liste verwendet diese Vorbereitungsphase
+nicht. Bereits gespeicherte Fehler bleiben sichtbar, bis eine neue Zuordnung
+berechnet wurde.

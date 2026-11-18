@@ -107,3 +107,17 @@ def test_unordered_fast_job_returns_source_bound_assignments(agenda_model,monkey
     assert value['transcript']==transcript
     assert value['llm']['processing_complete'] and value['llm']['review_status']=='skipped'
     assert [i['top_id'] for i in value['llm']['provenance']['identities']]==['stable-a','stable-b']
+
+
+@pytest.mark.parametrize('known',[False,True])
+def test_invalid_source_response_in_preparation_does_not_block_existing_fast_agenda(agenda_model,known):
+    # Valid JSON but the wrong envelope for source_call, matching the reported failure.
+    agenda_model.overrides['fast:discover']='{"kind":"result","result":{}}'
+    result=segment_known_agenda(rows(7),['Haushalt'] if known else [],processing_mode='fast')
+    if known:
+        assert result.assignments==[0]*7 and result.llm.processing_complete
+        assert all(b['phase']=='fast:detail' for b,_ in agenda_model.calls)
+    else:
+        assert result.assignments==[None]*7 and not result.llm.processing_complete
+        assert 'invalid_source_response' in result.llm.failure_reasons
+        assert all(r['status']=='not_processed' and 'invalid_source_response' in r['reason'] for r in result.llm.line_results)

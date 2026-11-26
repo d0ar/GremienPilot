@@ -1,3 +1,4 @@
+import ErrorDetails from './ErrorDetails';
 import { API_BASE } from '../api';
 import { useEffect, useState } from 'react';
 import type { ProcessingStepProps } from '../types';
@@ -147,6 +148,8 @@ export default function ProcessingStep({
             {pipeline?.execution?.progress?.last_delta_at != null && <p className="text-sm">Letzte Modellausgabe vor {Math.max(0, Math.round(now / 1000 - pipeline.execution.progress.last_delta_at))} Sekunden.</p>}
           </div>
         )}
+
+        {pipeline?.pipeline_id && <ErrorDetails key={pipeline.pipeline_id} jobId={pipeline.pipeline_id} />}
 
         {warnings.length > 0 && (
           <div className="mt-4 rounded-lg border border-yellow-200 bg-yellow-50 p-3 text-sm text-yellow-900">

@@ -140,7 +140,7 @@ def test_fast_agenda_uses_one_unreviewed_compact_pass(agenda_model, known):
     assert result.llm.processing_complete and not result.llm.review_complete
     assert result.llm.status == 'success' and result.llm.review_status == 'skipped'
     assert agenda_complete(vars(result.llm))
-    assert len(result.llm.reconstructions) == 1
+    assert len(result.llm.reconstructions) == (0 if known else 1)
     assert all(body['phase'].startswith('fast') for body, _ in agenda_model.calls)
     detail = [request for body, request in agenda_model.calls if body['phase'] == 'fast:detail']
     assert len(detail) == 1 and 'response' in detail[0]['response_format']['json_schema']['schema']['properties']
@@ -192,18 +192,10 @@ def test_fast_context_budget_preserves_every_source_without_review(agenda_model,
     result = agenda_detection.segment_known_agenda(rows, ['Haushalt'], processing_mode='fast')
     assert result.llm.processing_complete and result.assignments == [0]*len(rows)
     assert not result.llm.review_complete and result.llm.review_status == 'skipped'
-    context_calls = [(body, request) for body, request in agenda_model.calls if body['phase'] == 'fast:context']
-    assert len(context_calls) > 1  # Input must split when the larger output reserve is included.
-    assert [r['index'] for body, _ in context_calls for r in body['sources'] if 'index' in r] == list(range(len(rows)))
-    assert [r['index'] for body, _ in agenda_model.calls if body['phase'] == 'fast:detail'
-            for r in body['target_lines']] == list(range(len(rows)))
-    archive = result.llm.provenance['context_archive']
-    assert [i for node in archive if node['level'] == 0
-            for i in range(node['coverage'][0], node['coverage'][1]+1)] == list(range(len(rows)))
-    assert len({json.dumps(body, sort_keys=True) for body, _ in context_calls}) == len(context_calls)
-    for _, request in context_calls:
-        schema = request['response_format']['json_schema']['schema']
-        assert schema['properties']['evidence']['maxItems'] == 8
+    assert all(body['phase']=='fast:detail' for body,_ in agenda_model.calls)
+    assert [r['index'] for body,_ in agenda_model.calls for r in body['target_lines']]==list(range(len(rows)))
+    assert result.llm.provenance['context_archive']==[]
+    assert result.llm.provenance['fast_assignment_strategy']=='original_windows'
     config = get_llm_config()
     for body, request in agenda_model.calls:
         assert body['phase'].startswith('fast:')
@@ -248,7 +240,7 @@ def test_fast_context_failure_has_no_extra_attempt_or_review(agenda_model, monke
     else:
         agenda_model.overrides['fast:context'] = lambda body: {
             'narrative': 'Verlauf', 'evidence': [{'line_id': r['line_id']} for r in body['sources'][:9]]}
-    result = agenda_detection.segment_known_agenda(rows, ['Haushalt'], processing_mode='fast')
+    result = agenda_detection.segment_known_agenda(rows, [], processing_mode='fast')
     assert not result.llm.processing_complete
     assert result.assignments == [None]*len(rows)
     assert [body['phase'] for body, _ in agenda_model.calls] == ['fast:context']

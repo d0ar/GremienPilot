@@ -577,6 +577,9 @@ export default function AssignmentStep({
   const canProceed = hasTops ? assignedCount > 0 : true;
   const selectedSegmentBounds =
     selectedLineIndex !== null ? getCurrentSegmentBounds(selectedLineIndex) : null;
+  const technicalGaps = !agendaDetectionStale && !isDetectingAgenda
+    ? (agendaDetection?.llm?.line_results ?? []).filter(line => line.status === 'not_processed')
+    : [];
   const detectedUnassignedCount = agendaDetection
     ? (agendaDetection.llm?.line_results?.length
       ? agendaDetection.llm.line_results.filter(line => line.status !== 'assigned').length
@@ -622,6 +625,12 @@ export default function AssignmentStep({
           <span className="text-gray-600">{hasSummaries ? 'Entwurf vorbereitet' : 'Entwurf nach Prüfung'}</span>
         </div>
       </div>
+      {technicalGaps.length > 0 && <div role="alert" className="rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-900">
+        <p className="font-semibold">TOP-Zuordnung technisch unvollständig</p>
+        <p>{technicalGaps.length} Transkriptzeilen wurden nicht verarbeitet.</p>
+        <p className="mt-1 break-words">{technicalGaps[0]?.reason}</p>
+        <p className="mt-1">Bitte die technischen Fehlerdetails prüfen und die TOP-Zuordnung erneut berechnen.</p>
+      </div>}
       <section aria-label="TOP-Verarbeitung" className="grid gap-4 md:grid-cols-2">
         <div className="rounded-lg border border-gray-200 bg-white p-4">
           <h3 className="font-medium">1. Tagesordnung aus der Einladung</h3>

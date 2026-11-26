@@ -18,7 +18,7 @@ Slow-PDF darf dagegen in Fast wiederverwendet werden.
 | Bereich | Slow | Fast |
 | --- | --- | --- |
 | PDF | Bilder und Text aller Seiten; Inventare, Zusammenführung, unabhängige Seiten- und Beziehungsprüfungen, gezielte Korrekturen | Textlayer bevorzugt; Seiten ohne Text als Bild; Seiten gemeinsam bis zum Kontextlimit auswerten, mehrere Inventare einmal zusammenführen; keine Audits oder Reparaturaufrufe |
-| TOP-Zuordnung | Zwei unabhängige Rekonstruktionen und Detailzuordnungen, Klärung von Abweichungen | Ein Durchlauf für Agenda, Verlauf, TOP-Status und kompakte Zuordnungsbereiche; keine unabhängige zweite Bewertung oder Klärung |
+| TOP-Zuordnung | Zwei unabhängige Rekonstruktionen und Detailzuordnungen, Klärung von Abweichungen | Mit vorhandener TOP-Liste direkte Originaltextfenster; ohne Liste zunächst Agenda-Ermittlung und Rekonstruktion. Keine unabhängige zweite Bewertung oder Klärung |
 | Gemma-LoRA-Zusammenfassung | LoRA-Text, zwei unabhängige Inhaltsprüfungen pro Teil gegen dessen vollständiges Originaltranskript; Hinweise separat, keine Neufassung | Nur LoRA-Generierungen; alle Teiltexte als ungeprüften Entwurf erhalten |
 | Andere Zusammenfassungsprofile | Zwei Inventare, Entwurfsprüfung, Konsolidierung, zwei Abschlussprüfungen und begrenzte Korrekturen | Eine Generierung pro passendem Quellblock; höchstens eine Konsolidierung, sofern sie ins Kontextbudget passt; sonst alle Blockergebnisse erhalten |
 

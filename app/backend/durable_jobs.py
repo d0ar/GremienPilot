@@ -118,12 +118,51 @@ def artifact(step, kind, value):
                    (str(uuid.uuid4()), ctx.job_id, step, kind, encoded, hash_value(encoded), time.time()))
 
 
+def record_failure(exc, *, phase=None, config=None):
+    """Best-effort diagnostics must never replace the original job outcome."""
+    ctx = CURRENT.get()
+    if ctx is None:
+        return
+    try:
+        from error_diagnostics import exception_report
+        artifact('error-details', 'error_details', exception_report(exc, phase=phase,
+            attempt=getattr(ctx, 'attempt', None), config=config))
+    except Exception as failure:
+        logging.getLogger(__name__).warning('Could not save error details (%s)', type(failure).__name__)
+
+
+def error_details(job_id):
+    from error_diagnostics import clean, CONFIG_FIELDS, PROGRESS_FIELDS
+    job = load(job_id)
+    if job is None:
+        return None
+    with persistence.connect() as db:
+        rows = db.execute("SELECT value FROM durable_artifacts WHERE job_id=? AND kind='error_details' ORDER BY recorded_at DESC, rowid DESC LIMIT 21", (job_id,)).fetchall()
+        legacy = db.execute("SELECT value,recorded_at FROM durable_artifacts WHERE job_id=? AND kind='technical_diagnostic' ORDER BY recorded_at DESC, rowid DESC LIMIT 10", (job_id,)).fetchall() if not rows else []
+    versions = (job.get('payload') or {}).get('versions') or {}
+    config = versions.get('model') or {}
+    reports = [json.loads(row['value']) for row in rows[:20]]
+    # Old jobs retain validation codes, but their original exceptions cannot be recovered.
+    previous = []
+    for row in legacy:
+        value = json.loads(row['value'])
+        previous.append({k:value[k] for k in ('phase','attempt','code') if k in value})
+    progress = job.get('progress') or {}
+    return clean(dict(schema_version=1, job_id=job_id, kind=job['kind'], state=job['state'],
+        error=job.get('error'), attempt=job['attempt'], created_at=job['created_at'], updated_at=job['updated_at'],
+        processing_mode=(versions.get('processing') or {}).get('mode'),
+        code_versions=versions.get('code') or {},
+        progress={k:progress[k] for k in PROGRESS_FIELDS if k in progress},
+        configuration={k:config[k] for k in CONFIG_FIELDS if k in config},
+        reports=reports, truncated=len(rows)>20, previous_diagnostics=previous))
+
+
 def version_snapshot(payload=None):
     # Code hashes include prompts, validators and chunking policy. No credentials.
     from llm_config import get_llm_config
     from processing_mode import VERSION as processing_version
     files = ("processing_mode.py", "llm_config.py", "durable_jobs.py", "summarize.py", "summary_grounding.py", "agenda_llm.py", "agenda_order.py", "agenda_detection.py",
-             "extract_tops.py", "llm_transport.py", "main.py", "agenda_context.py",
+             "extract_tops.py", "llm_transport.py", "main.py", "error_diagnostics.py", "agenda_context.py",
              "agenda_labels.py", "assignment_suggestions.py", "persistence.py", "source_contract.py",
              "gemma_summary.py", "prompt_gemma.txt")
     policy_keys = (
@@ -331,6 +370,7 @@ class Runtime:
     def __init__(self, job, owner, stop):
         self.job_id, self.owner, self.stop = job["job_id"], owner, stop
         self.payload = job["payload"]
+        self.attempt = job.get("attempt", 0)
         self.publication = None
         self.phase = 'starting'
 
@@ -488,6 +528,8 @@ class Manager:
         except persistence.SessionConflictError:
             state, error = "superseded", "Sitzung wurde bearbeitet; Ergebnis nicht übernommen"
         except Exception as exc:
+            record_failure(exc, phase=ctx.phase,
+                           config=job['payload'].get('versions', {}).get('model'))
             cause = exc
             while cause.__cause__ or cause.__context__:
                 cause = cause.__cause__ or cause.__context__

@@ -203,6 +203,7 @@ class Workflow:
                             claim['grounding'] = deepcopy(inherited[0]['grounding'])
                     check(data)
                 except (ValueError, KeyError, TypeError) as exc:
+                    durable.record_failure(exc, phase=phase, config=self.config.public_snapshot())
                     last_diagnostic = {'code': str(exc) if isinstance(exc, SummaryValidationError) else type(exc).__name__}
                     durable.artifact(step, 'technical_diagnostic', {'phase': phase, 'attempt': attempt,
                         'code': str(exc) if isinstance(exc, SummaryValidationError) else type(exc).__name__})

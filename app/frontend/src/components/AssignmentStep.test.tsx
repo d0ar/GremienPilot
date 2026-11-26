@@ -502,3 +502,27 @@ it('does not certify legacy confidence without completed independent checks', ()
     segments: defaultProps.agendaDetection!.segments.map(segment => ({...segment, confidence: 1, uncertain: false})) }});
   expect(screen.getByRole('button', {name: 'Alle sicheren übernehmen'})).toBeDisabled();
 });
+
+it('highlights invalid_source_response as a technical failure without changing assignments', () => {
+  const setAssignments = vi.fn();
+  const llm = reviewedLines(2);
+  llm.status = 'failed';
+  llm.processing_complete = false;
+  llm.review_complete = false;
+  llm.line_results = llm.line_results!.map(line => ({ ...line, top_ids: [], status: 'not_processed',
+    reason: 'Technisch nicht verarbeitet: invalid_source_response' }));
+  const detection = { ...defaultProps.agendaDetection!, assignments: [null, null], segments: [], llm };
+  const view = renderAssignmentStep({ agendaDetection: detection, setAssignments });
+  const alert = screen.getByRole('alert');
+  expect(alert).toHaveTextContent('TOP-Zuordnung technisch unvollständig');
+  expect(alert).toHaveTextContent('2 Transkriptzeilen wurden nicht verarbeitet.');
+  expect(alert).toHaveTextContent('invalid_source_response');
+  expect(setAssignments).not.toHaveBeenCalled();
+  view.rerender(<AssignmentStep {...defaultProps} agendaDetection={detection} agendaDetectionStale />);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('does not treat semantic nonassignment as a technical error', () => {
+  renderAssignmentStep({ agendaDetection: { ...defaultProps.agendaDetection!, llm: reviewedLines(2, [0, 1]) } });
+  expect(screen.queryByText('TOP-Zuordnung technisch unvollständig')).not.toBeInTheDocument();
+});

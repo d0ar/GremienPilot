@@ -46,7 +46,10 @@ def test_reasoning_reaches_all_task_requests(monkeypatch, fake_openai_module, ef
                 result = agenda_detection.segment_known_agenda(transcript, ["1. Haushalt"], use_llm=True)
             else:
                 result = agenda_detection.detect_agenda_from_transcript(transcript, use_llm=True)
-            assert result.llm.attempted_calls == (4 if mode == "fast" else 8)
+            # FAST with a known agenda reads direct original windows (one call here);
+            # without an agenda it still runs context, discovery, reconstruction and detail.
+            expected_calls = (1 if task == "known_agenda" else 4) if mode == "fast" else 8
+            assert result.llm.attempted_calls == expected_calls
             assert result.llm.failed_calls == 0
 
     requests = [call for _, call in model.calls] if task.endswith("agenda") else fake_openai_module.instances[0].calls

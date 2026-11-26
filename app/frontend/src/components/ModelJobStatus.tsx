@@ -1,3 +1,4 @@
+import ErrorDetails from './ErrorDetails';
 import { useEffect, useState } from 'react';
 import type { ModelJob } from '../api';
 
@@ -61,5 +62,6 @@ export default function ModelJobStatus({ title, job, busy, error, onCancel }: {
         style={percent === undefined ? undefined : { width: `${percent}%` }} />
     </div>}
     {(error || job?.error) && <p role="alert" className="mt-2 text-red-800">{error || job?.error}</p>}
+    {job?.job_id && <ErrorDetails key={job.job_id} jobId={job.job_id} />}
   </div>;
 }

@@ -137,12 +137,20 @@ def test_preparation_result_and_source_request_are_disjoint_even_if_provider_ign
     assert len(agenda_model.calls)==1
 
 
+@pytest.mark.parametrize('mode',['fast','slow'])
 @pytest.mark.parametrize('identity',['evidence','grounding','source_ranges','uncertain','agenda_states_by_id','spans_by_end','spans_by_start'])
-def test_keyed_state_ids_remain_identities_even_when_named_like_metadata(agenda_model,identity):
-    result=run(['Beratung.'],tops=['1 Haushalt'],top_ids=[identity],processing_mode='fast')
+def test_keyed_state_ids_remain_identities_even_when_named_like_metadata(agenda_model,identity,mode):
+    result=run(['Beratung.'],tops=['1 Haushalt'],top_ids=[identity],processing_mode=mode)
     assert result.llm.processing_complete
-    assert result.llm.agenda_states[0]['top_id']==identity
-    assert result.llm.agenda_states[0]['grounding']['reference_status']=='exact'
+    state=result.llm.agenda_states[0]
+    assert state['top_id']==identity
+    assert state['status']=='treated'
+    if mode=='slow':
+        # Model-keyed reconstruction states carry their own source grounding.
+        assert state['grounding']['reference_status']=='exact'
+    else:
+        # FAST with a known agenda derives status from its window line decisions.
+        assert result.llm.provenance['fast_assignment_strategy']=='original_windows'
 
 
 def test_truncated_json_never_becomes_a_state_or_success(agenda_model, monkeypatch):

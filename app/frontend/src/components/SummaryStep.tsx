@@ -1,10 +1,16 @@
 import ErrorDetails from './ErrorDetails';
 import { useState, useRef, useEffect, useCallback, type ChangeEvent } from 'react';
 import { exportProtocol } from '../api';
-import type { ExportFormat, ExportMetadata, StructuredSummary, SummaryStepProps, TranscriptLine } from '../types';
+import type { ExportFormat, ExportMetadata, StructuredSummary, SummaryReview, SummaryStepProps, TranscriptLine } from '../types';
+import { DEFAULT_CUSTOM_SUMMARY_PROMPT } from './LLMSettingsPanel';
+import { SUMMARY_STYLE_LABELS, customPromptChanged, effectiveSummaryStyle, generatedSummaryStyle } from '../summaryProvenance';
 import AudioPlayer from './AudioPlayer';
 import ProtocolText from './ProtocolText';
 import { useAudioSync } from '../hooks/useAudioSync';
+
+function formatGeneratedAt(epochSeconds: number): string {
+  return new Date(epochSeconds * 1000).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
+}
 
 function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -58,6 +64,7 @@ export default function SummaryStep({
   speakerNames,
   exportMetadata,
   setExportMetadata,
+  summarySettings,
 }: SummaryStepProps) {
   const [selectedTop, setSelectedTop] = useState(0);
   const [editingTop, setEditingTop] = useState<number | null>(null);
@@ -69,6 +76,7 @@ export default function SummaryStep({
   const [acceptedSummaryWarnings, setAcceptedSummaryWarnings] = useState(false);
   const [regenerationCandidate, setRegenerationCandidate] = useState<number[] | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [promptCheck, setPromptCheck] = useState<{ review?: SummaryReview; prompt: string; changed: boolean } | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
   const transcriptLineRefs = useRef<Array<HTMLDivElement | null>>([]);
 
@@ -276,6 +284,22 @@ export default function SummaryStep({
   const structured = selectedReview?.structured ?? null;
   const isGemmaProse = structured?.verification?.source_contract === 'gemma-prose-review-v1';
   const reviewComplete = selectedReview?.llm_usage?.review_complete === true;
+  const generatedStyle = generatedSummaryStyle(selectedReview);
+  const generatedAt = selectedSummaryState?.generated_at;
+  const currentCustomPrompt = summarySettings
+    ? summarySettings.customSummaryPrompt ?? DEFAULT_CUSTOM_SUMMARY_PROMPT : null;
+  const promptChangedSinceGeneration = Boolean(promptCheck?.changed && promptCheck.review === selectedReview
+    && promptCheck.prompt === currentCustomPrompt);
+  const regenerationStyle = summarySettings ? effectiveSummaryStyle(summarySettings) : null;
+
+  useEffect(() => {
+    if (currentCustomPrompt === null || generatedStyle !== 'gemma4-custom') return;
+    let active = true;
+    void customPromptChanged(selectedReview, currentCustomPrompt).then((changed) => {
+      if (active) setPromptCheck({ review: selectedReview, prompt: currentCustomPrompt, changed: changed === true });
+    });
+    return () => { active = false; };
+  }, [selectedReview, currentCustomPrompt, generatedStyle]);
 
   const getSourceLink = (section: keyof StructuredSummary, itemIndex: number) => {
     return selectedReview?.source_links.find(
@@ -668,6 +692,16 @@ export default function SummaryStep({
                       Für diesen TOP liegt keine Zusammenfassung vor.
                     </div>
                   )}
+                  {generatedStyle && summaries[selectedSummaryIndex] && (
+                    <p className="border-t border-gray-100 pt-2 text-xs text-gray-500" aria-label="Herkunft der Zusammenfassung">
+                      {generatedAt ? `Erzeugt am ${formatGeneratedAt(generatedAt)} · ` : 'Erzeugt · '}
+                      Stil: {SUMMARY_STYLE_LABELS[generatedStyle]}
+                      {selectedSummaryState?.origin === 'manual' && ' · danach manuell bearbeitet'}
+                      {promptChangedSinceGeneration && (
+                        <span className="ml-1 font-medium text-amber-800">· Prompt seit Erzeugung geändert</span>
+                      )}
+                    </p>
+                  )}
                 </div>
               ) : (
                 <div className="flex items-center justify-center h-full text-gray-400">
@@ -746,6 +780,17 @@ export default function SummaryStep({
               Im CPU-Modus kann dies mehrere Stunden dauern und erhebliche Serverleistung beanspruchen.
               Prüfen Sie vorher, ob die vorhandene Zusammenfassung nicht bereits ausreicht.
             </p>
+            {regenerationStyle && (
+              <p className="mt-2 text-sm text-gray-700">
+                Stil: <span className="font-medium">{SUMMARY_STYLE_LABELS[regenerationStyle]}</span>.{' '}
+                {regenerationStyle === 'gemma4-lora'
+                  ? 'Fester Prompt – der Prompt aus den Einstellungen wird nicht verwendet.'
+                  : regenerationStyle === 'gemma4-custom'
+                    ? 'Es gilt der eigene Prompt aus den aktuellen Einstellungen.'
+                    : 'Es gilt der System-Prompt aus den aktuellen Einstellungen.'}
+                {' '}Das Modell wird neu aufgerufen; zwischengespeicherte Antworten werden nicht wiederverwendet.
+              </p>
+            )}
             <p className="mt-2 text-sm text-gray-600">
               Der Job läuft serverseitig weiter. Sie können die Seite verlassen und später zurückkehren.
             </p>

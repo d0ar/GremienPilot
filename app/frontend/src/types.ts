@@ -582,6 +582,14 @@ export interface SummaryStepProps {
   speakerNames: Record<string, string>;
   exportMetadata: ExportMetadata;
   setExportMetadata: (metadata: ExportMetadata) => void;
+  // Current AI settings; a regeneration uses these, not the stored ones.
+  summarySettings?: SummarySettings;
+}
+
+export interface SummarySettings {
+  model?: string;
+  summaryStyle?: SummaryStyle;
+  customSummaryPrompt?: string;
 }
 
 // Color palette type for TOPs

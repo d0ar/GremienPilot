@@ -48,11 +48,11 @@ Hervorhebung teilen sich in PR 3 eine Markierungskomponente.
 
 **Umsetzung:**
 
-- [ ] Flag für frische Generierung im Summary-Job (`refs`) bis zu den Workflow-Aufrufen
+- [x] Flag für frische Generierung im Summary-Job (`refs`) bis zu den Workflow-Aufrufen
       durchreichen. Cache lesen überspringen, schreiben beibehalten.
-- [ ] `prompt_sha256` und Stil im Frontend-Typ verfügbar machen und vergleichen.
-- [ ] Herkunftszeile und Dialogtext in `SummaryStep.tsx`.
-- [ ] Tests (Backend und Frontend).
+- [x] `prompt_sha256` und Stil im Frontend-Typ verfügbar machen und vergleichen.
+- [x] Herkunftszeile und Dialogtext in `SummaryStep.tsx`.
+- [x] Tests (Backend und Frontend).
 
 ## PR 2 – Rückgängig-Verlauf und TOPs verschieben
 

@@ -116,3 +116,11 @@ def test_fresh_scope_skips_shared_cache_only(monkeypatch, tmp_path):
     with fresh_responses(False):
         assert cache_read('key') == 'neu'
     assert llm_transport._FRESH.get() is False
+
+
+def test_frontend_hash_uses_the_backend_custom_system_prompt():
+    source = (Path(__file__).resolve().parents[2] / 'frontend/src/summaryProvenance.ts').read_text(encoding='utf-8')
+    assert re.search(r'export const GEMMA_CUSTOM_SYSTEM = `([^`]+)`;', source)[1] == gemma.CUSTOM_SYSTEM
+    # Vector also asserted in summaryProvenance.test.ts.
+    assert digest([gemma.CUSTOM_SYSTEM, 'Stil "A"\nÄ\tß \\ \u0001 € 😀']) == (
+        '93ac6c2b63b9ed520dca869ad52d5ee441073aa0c0a9169c5b56341512412888')

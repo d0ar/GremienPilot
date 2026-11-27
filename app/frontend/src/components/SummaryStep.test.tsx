@@ -482,3 +482,46 @@ it('shows the current Gemma review phase while model transport is generating', (
       progress: { phase: 'generating', summary_phase: 'summary_final_review' } } } });
   expect(screen.getByText(/Unabhängige Inhaltsprüfung gegen das Originaltranskript läuft/)).toBeInTheDocument();
 });
+
+describe('summary provenance', () => {
+  // Backend digest([CUSTOM_SYSTEM, prompt]) for PROMPT, computed with Python.
+  const PROMPT = 'Stil "A"\nÄ\tß \\ \u0001 € 😀';
+  const PROMPT_SHA256 = '93ac6c2b63b9ed520dca869ad52d5ee441073aa0c0a9169c5b56341512412888';
+  const review = (style: string) => ({ source_links: [], review_warnings: [], llm_usage: {
+    summary_style: style, processing_complete: true, policy: { prompt_sha256: PROMPT_SHA256 } } });
+  const states = { 0: { top_id: 'a', status: 'ready', generated_at: Date.UTC(2026, 10, 27, 12, 30) / 1000 } };
+
+  it('names time and style and warns when the custom prompt changed since generation', async () => {
+    const { rerender } = renderSummaryStep({ summaryReviews: { 0: review('gemma4-custom') }, summaryStates: states,
+      summarySettings: { summaryStyle: 'gemma4-custom', customSummaryPrompt: PROMPT } });
+    const line = screen.getByLabelText('Herkunft der Zusammenfassung');
+    expect(line).toHaveTextContent(/Erzeugt am 27\.11\.26, \d\d:30 · Stil: Eigener Gemma-Stil/);
+    // Give the asynchronous hash comparison time to settle before asserting absence.
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(line).not.toHaveTextContent('Prompt seit Erzeugung geändert');
+    rerender(<SummaryStep {...defaultProps} summaryReviews={{ 0: review('gemma4-custom') }} summaryStates={states}
+      summarySettings={{ summaryStyle: 'gemma4-custom', customSummaryPrompt: 'Anderer Stil' }} />);
+    expect(await screen.findByText(/Prompt seit Erzeugung geändert/)).toBeInTheDocument();
+  });
+
+  it('never warns about the fixed LoRA prompt', async () => {
+    renderSummaryStep({ summaryReviews: { 0: review('gemma4-lora') }, summaryStates: states,
+      summarySettings: { summaryStyle: 'gemma4-custom', customSummaryPrompt: 'Anderer Stil' } });
+    expect(screen.getByLabelText('Herkunft der Zusammenfassung')).toHaveTextContent('Stil: HPI-LoRA-Stil (fester Prompt)');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(screen.queryByText(/Prompt seit Erzeugung geändert/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [{ summaryStyle: 'gemma4-lora' as const }, 'HPI-LoRA-Stil (fester Prompt)', 'Fester Prompt – der Prompt aus den Einstellungen wird nicht verwendet.'],
+    [{ summaryStyle: 'gemma4-custom' as const }, 'Eigener Gemma-Stil', 'Es gilt der eigene Prompt aus den aktuellen Einstellungen.'],
+    [{ model: 'qwen3:8b', summaryStyle: 'gemma4-custom' as const }, 'Strukturiert', 'Es gilt der System-Prompt aus den aktuellen Einstellungen.'],
+  ])('names the style in the regeneration dialog (%o)', async (settings, label, note) => {
+    const user = userEvent.setup();
+    renderSummaryStep({ summarySettings: settings });
+    await user.click(screen.getByRole('button', { name: 'Neu generieren' }));
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveTextContent(`Stil: ${label}.`);
+    expect(dialog).toHaveTextContent(note);
+  });
+});

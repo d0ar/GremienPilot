@@ -117,6 +117,7 @@ from speaker_recognition import (
     speaker_embedding_config_from_env,
 )
 from transcript_splitter import split_transcript_for_agenda_detection
+from highlight_terms import router as highlight_terms_router
 
 # Configure logging with timestamps
 logging.basicConfig(
@@ -185,6 +186,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(highlight_terms_router)
 
 # Job cleanup configuration
 JOB_MAX_AGE_SECONDS = int(os.environ.get("JOB_MAX_AGE_SECONDS", "7200"))  # 2 hours

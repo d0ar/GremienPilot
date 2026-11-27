@@ -128,7 +128,7 @@ logger = logging.getLogger(__name__)
 
 
 import durable_jobs as durable
-from llm_transport import request_control, work_slot, LLMCancelledError
+from llm_transport import request_control, work_slot, fresh_responses, LLMCancelledError
 
 
 class CancellationRequested(LLMCancelledError):
@@ -2637,7 +2637,9 @@ def _run_summary_job(summary_job_id: str) -> None:
             title = "Gesamtes Gespräch" if no_top_mode else session["tops"][index]
             names = session.get("speaker_names") or {}
             text = "\n".join(format_line_for_summary(line, names) for line in lines)
-            with work_slot(LLM_WORK_LOCK):
+            # A manual regeneration never reuses a shared cached response; its own
+            # job checkpoints still apply when the same job resumes.
+            with work_slot(LLM_WORK_LOCK), fresh_responses(refs.get("fresh_generation", False)):
                 result = summarize_segment(title, text, model=refs.get("model"),
                     system_prompt=refs.get("system_prompt"),
                     summary_style=refs.get("summary_style"),
@@ -4088,6 +4090,7 @@ async def create_summary_job(session_id: str, request: SummaryJobCreateRequest):
                 "system_prompt": request.system_prompt,
                 "summary_style": request.summary_style,
                 "custom_summary_prompt": request.custom_summary_prompt,
+                "fresh_generation": True,
                 "session_revision": saved.get("revision"),
                 "input_snapshot": saved,
             },

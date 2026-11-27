@@ -88,6 +88,17 @@ Adapterstärke, Stil und Prompt sind Teil der Cache- und Checkpointkennung;
 die Umschaltung erfolgt pro Anfrage, ohne globale llama.cpp-Änderung.
 Eigene Stilvorgaben gelangen nicht in die fachlichen Inhaltsprüfungen.
 
+**Neu generieren umgeht den Antwort-Cache.** Ein manuell gestarteter Auftrag
+(„Neu generieren“ auf der Protokollseite) liest keine Antworten aus `LLM_CACHE_DIR`,
+auch bei unverändertem Prompt und Transkript; das Modell wird immer neu aufgerufen.
+Das neue Ergebnis wird anschließend wieder im Cache gespeichert. Checkpoints gelten
+nur innerhalb desselben Auftrags: Setzt ein abgebrochener Auftrag fort, verwendet er
+seine eigenen Zwischenergebnisse weiter. Pipeline und deren Wiederaufnahme nutzen den
+Cache unverändert. Unter jeder Zusammenfassung nennt eine Herkunftszeile Erzeugungszeit
+und Stil. Im eigenen Gemma-Stil warnt sie mit „Prompt seit Erzeugung geändert“, wenn der
+eigene Prompt der aktuellen Einstellungen nicht zum gespeicherten `prompt_sha256` passt.
+Im LoRA-Stil ist der Prompt fest; der Prompt aus den Einstellungen wird nicht verwendet.
+
 `structured` aktiviert den
 bisherigen JSON-Zusammenfassungspfad. Explizite andere Modellnamen benötigen
 einen passenden Server und verwenden nicht automatisch den Adapter.

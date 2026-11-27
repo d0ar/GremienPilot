@@ -65,6 +65,21 @@ class ProviderError(RuntimeError):
 
 _CONTROL = ContextVar('llm_control', default=(None, None))
 _EXPECTED_DIGEST = ContextVar('llm_expected_digest', default=None)
+_FRESH = ContextVar('llm_fresh_responses', default=False)
+
+
+@contextmanager
+def fresh_responses(enabled=True):
+    """Skip the shared response cache for one operation; results are still written.
+
+    Checkpoints and cache entries of the current durable job remain readable, so
+    resuming the same job never repeats completed model calls.
+    """
+    token = _FRESH.set(bool(enabled))
+    try:
+        yield
+    finally:
+        _FRESH.reset(token)
 
 
 @contextmanager
@@ -596,7 +611,7 @@ def cache_read(key):
                 (ctx.job_id, 'cache:' + hashlib.sha256(key.encode()).hexdigest())).fetchone()
         if row:
             return json.loads(row[0])
-    if key is None:
+    if key is None or _FRESH.get():
         return None
     directory = os.environ.get('LLM_CACHE_DIR')
     if not directory:

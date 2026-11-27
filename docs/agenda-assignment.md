@@ -60,7 +60,12 @@ Zeilen- und Segmentzuordnungen, übernommene Zuordnungsvorschläge, alle
 TOP-Änderungen und die Übernahme einer PDF-Tagesordnung. Jeder Schritt stellt
 TOPs, IDs und Zuordnungen vollständig wieder her. Ein gelöschter TOP erhält
 seine Zusammenfassung, ihren Status und die Prüfhinweise zurück. Für TOPs, die
-noch existieren, bleibt die aktuelle Zusammenfassung erhalten. Nach dem Löschen
+noch existieren, bleibt die aktuelle Zusammenfassung erhalten. Hat das
+automatische Speichern den TOP zwischenzeitlich schon entfernt, merkt sich der
+Server die Zusammenfassungsdaten der zuletzt entfernten 20 TOPs intern. Kommt ein
+TOP mit unverändertem Text zurück, übernimmt er Status, Herkunft, Prüfhinweise
+und Quellen unverändert; ein geänderter Text gilt wie bisher als manuelle
+Bearbeitung. Diese Daten erscheinen nicht in der Sitzung oder im Export. Nach dem Löschen
 erscheint zusätzlich für etwa zehn Sekunden der Hinweis „TOP ‚…‘ gelöscht –
 Rückgängig“.
 

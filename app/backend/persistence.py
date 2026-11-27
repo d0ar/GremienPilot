@@ -328,6 +328,10 @@ def init_db(db_path: Path | None = None) -> None:
             db.execute("ALTER TABLE sessions ADD COLUMN agenda_proposals_json TEXT")
         if "pdf_source_job_id" not in session_columns:
             db.execute("ALTER TABLE sessions ADD COLUMN pdf_source_job_id TEXT")
+        if "removed_top_summaries_json" not in session_columns:
+            # Internal bookkeeping: last summary data of recently removed TOPs,
+            # so an undo in the editor can restore them unchanged.
+            db.execute("ALTER TABLE sessions ADD COLUMN removed_top_summaries_json TEXT")
         if "revision" not in session_columns:
             db.execute(
                 """
@@ -1466,6 +1470,10 @@ def save_session(
     proposals_json = _to_json(state.get('agenda_proposals'))
     reviews_json = {int(index): _to_json(value) or '{}' for index, value in (state.get('summary_reviews') or {}).items()}
     states_json = {int(index): _to_json(value) or '{}' for index, value in (state.get('summary_states') or {}).items()}
+    removed_tops_json = (
+        _to_json(list(state.get('removed_top_summaries') or []))
+        if 'removed_top_summaries' in state else None
+    )
     transcript_rows = None if state.get('transcript') is None else [
         (session_id, index, str(line.get('line_id') or uuid.uuid4()),
          str(line.get('speaker', '')), str(line.get('text', '')),
@@ -1479,7 +1487,7 @@ def save_session(
         db.execute("BEGIN IMMEDIATE")
         fence(db)
         existing = db.execute(
-            "SELECT created_at, revision, processing_mode, enforce_top_order, pdf_source_job_id, summary_style, custom_summary_prompt FROM sessions WHERE session_id = ?",
+            "SELECT created_at, revision, processing_mode, enforce_top_order, pdf_source_job_id, summary_style, custom_summary_prompt, removed_top_summaries_json FROM sessions WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         created_at = float(existing["created_at"]) if existing else now
@@ -1496,9 +1504,10 @@ def save_session(
             """
             INSERT INTO sessions (
                 session_id, job_id, current_step, skipped_assignment, export_metadata_json,
-                agenda_proposals_json, processing_mode, enforce_top_order, pdf_source_job_id, summary_style, custom_summary_prompt, revision, created_at, updated_at
+                agenda_proposals_json, processing_mode, enforce_top_order, pdf_source_job_id, summary_style, custom_summary_prompt,
+                removed_top_summaries_json, revision, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 job_id = excluded.job_id,
                 current_step = excluded.current_step,
@@ -1510,6 +1519,7 @@ def save_session(
                 pdf_source_job_id = excluded.pdf_source_job_id,
                 summary_style = excluded.summary_style,
                 custom_summary_prompt = excluded.custom_summary_prompt,
+                removed_top_summaries_json = excluded.removed_top_summaries_json,
                 revision = sessions.revision + ?,
                 updated_at = excluded.updated_at
             """,
@@ -1525,6 +1535,9 @@ def save_session(
                 state.get("pdf_source_job_id", existing["pdf_source_job_id"] if existing else None),
                 state.get("summary_style", existing["summary_style"] if existing else None),
                 state.get("custom_summary_prompt", existing["custom_summary_prompt"] if existing else None),
+                # Callers that do not handle the bookkeeping keep the stored value.
+                removed_tops_json if removed_tops_json is not None
+                else (existing["removed_top_summaries_json"] if existing else None),
                 created_at,
                 now,
                 1 if bump_revision else 0,
@@ -1747,6 +1760,7 @@ def load_session(
         for item in summary_states
     }
     session["agenda_proposals"] = _from_json(session.pop("agenda_proposals_json", None))
+    session["removed_top_summaries"] = _from_json(session.pop("removed_top_summaries_json", None)) or []
     session["export_metadata"] = _from_json(session.get("export_metadata_json")) or {}
     session["transcript"] = [_transcript_row(line) for line in transcript] if transcript else None
     return session

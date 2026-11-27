@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { SummaryStyle } from '../types';
 import SpeakerProfileManager from './SpeakerProfileManager';
+import HighlightTermsEditor from './HighlightTermsEditor';
 
 export interface LLMSettings {
   model: string;
@@ -130,7 +131,7 @@ export default function LLMSettingsPanel({
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">KI-Einstellungen</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Einstellungen</h2>
           <button
             onClick={onClose}
             className="p-1 hover:bg-gray-100 rounded-lg transition-colors"
@@ -143,6 +144,7 @@ export default function LLMSettingsPanel({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-6 space-y-6">
+          <h3 className="text-base font-semibold text-gray-900">KI-Einstellungen</h3>
           <div>
             <label htmlFor="llm-model" className="block text-sm font-medium text-gray-700">Modellüberschreibung</label>
             <input id="llm-model" value={settings.model}
@@ -200,12 +202,14 @@ export default function LLMSettingsPanel({
           </div>
 
           <SpeakerProfileManager />
+
+          <HighlightTermsEditor />
         </div>
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-gray-200 bg-gray-50">
           <p className="text-xs text-gray-500 text-center">
-            Einstellungen werden automatisch gespeichert
+            KI-Einstellungen werden automatisch gespeichert, Hervorhebungen mit „Hervorhebungen speichern“
           </p>
         </div>
       </div>

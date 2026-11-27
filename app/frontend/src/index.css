@@ -119,9 +119,16 @@ body {
 .protocol-prose :is(th, td):not(:first-child) { text-align: center; }
 
 @media (min-width: 64rem) {
+  /* Pane sizes come from ResizablePanes.tsx via custom properties; the fallbacks are the defaults. */
   .review-workspace {
-    grid-template-columns: 17rem minmax(0, 1fr);
+    position: relative;
+    grid-template-columns: var(--review-agenda-width, 17rem) minmax(0, 1fr);
     height: max(38rem, calc(100dvh - 13rem));
+  }
+
+  .summary-panes {
+    position: relative;
+    grid-template-rows: minmax(0, var(--summary-pane-size, 3fr)) minmax(0, var(--transcript-pane-size, 2fr));
   }
 
   .review-scroll {
@@ -132,9 +139,60 @@ body {
 
 @media (min-width: 80rem) {
   .summary-panes {
-    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    grid-template-columns: minmax(0, var(--summary-pane-size, 3fr)) minmax(0, var(--transcript-pane-size, 2fr));
     grid-template-rows: minmax(0, 1fr);
   }
+}
+
+/* Draggable separators between review panes; they sit in the grid gap. */
+.pane-separator {
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+}
+
+.pane-separator[aria-orientation="vertical"] {
+  top: 0;
+  bottom: 0;
+  cursor: col-resize;
+}
+
+.pane-separator[aria-orientation="horizontal"] {
+  left: 0;
+  right: 0;
+  cursor: row-resize;
+}
+
+.pane-separator::after {
+  content: "";
+  border-radius: 9999px;
+  background: var(--color-gray-300);
+  transition: background-color 120ms;
+}
+
+.pane-separator[aria-orientation="vertical"]::after {
+  width: 3px;
+  height: 2.5rem;
+}
+
+.pane-separator[aria-orientation="horizontal"]::after {
+  width: 2.5rem;
+  height: 3px;
+}
+
+.pane-separator:hover::after,
+.pane-separator:focus-visible::after,
+.pane-separator[data-dragging]::after {
+  background: var(--color-blue-600);
+}
+
+.pane-separator:focus-visible {
+  outline: 2px solid var(--color-blue-600);
+  outline-offset: -2px;
+  border-radius: 0.25rem;
 }
 
 :where(button, a, input, select, textarea, summary):focus-visible {

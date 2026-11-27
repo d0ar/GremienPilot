@@ -1,14 +1,19 @@
-import { useState, useRef, useEffect, type MouseEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent } from 'react';
 import type {
   AssignmentSuggestionSegment,
   AssignmentStepProps,
+  TopEdit,
+  TopUndoResult,
   TranscriptLine,
   TopColor,
 } from '../types';
 import AudioPlayer from './AudioPlayer';
 import ModelJobStatus from './ModelJobStatus';
 import PdfSources from './PdfSources';
+import UndoNotice, { type UndoNoticeContent } from './UndoNotice';
 import { useAudioSync } from '../hooks/useAudioSync';
+import { useUndoHistory } from '../hooks/useUndoHistory';
+import { MAX_TOP_HISTORY, UNDO_LOCKED_HINT, moveTopInList, transcriptStructureKey } from '../topHistory';
 import SpeakerNameEditor from './SpeakerNameEditor';
 import { mergedTiming } from '../transcriptTiming';
 
@@ -30,10 +35,19 @@ const topColors: TopColor[] = [
   { bg: 'bg-orange-100', border: 'border-orange-300', text: 'text-orange-700', dot: 'bg-orange-500' },
 ];
 
-// How many past assignment states to keep for the "Rückgängig" undo button.
-const MAX_ASSIGNMENT_HISTORY = 20;
+const sameList = <T,>(left: readonly T[], right: readonly T[]) =>
+  left.length === right.length && left.every((value, index) => value === right[index]);
+
+// Fallback history entry when no shared history is passed in.
+interface LocalTopSnapshot {
+  tops: string[];
+  topIds: string[];
+  assignments: (number | null)[];
+  selectedTopId: string | null;
+}
 
 export default function AssignmentStep({
+  history,
   onNext,
   onBack,
   tops,
@@ -73,7 +87,12 @@ export default function AssignmentStep({
   const [editingLine, setEditingLine] = useState<number | null>(null);
   const [editText, setEditText] = useState('');
   const [topTitleDraft, setTopTitleDraft] = useState(tops[0] ?? '');
-  const [assignmentHistory, setAssignmentHistory] = useState<(number | null)[][]>([]);
+  const [deleteNotice, setDeleteNotice] = useState<(UndoNoticeContent & { entryId: number }) | null>(null);
+  const [liveAnnouncement, setLiveAnnouncement] = useState('');
+  const [dragTopIndex, setDragTopIndex] = useState<number | null>(null);
+  const [dropTopIndex, setDropTopIndex] = useState<number | null>(null);
+  const topButtonRefs = useRef(new Map<string, HTMLButtonElement>());
+  const pendingTopFocusRef = useRef<string | null>(null);
 
   const stableTopIds = tops.map((_, index) => topIds[index] ?? `top-${index}`);
   const updateTops = (nextTops: string[], nextTopIds = stableTopIds) => {
@@ -130,31 +149,61 @@ export default function AssignmentStep({
 
   const counts = getAssignmentCounts();
 
-  // Apply a new assignments array while remembering the previous one, so an
-  // accidental bulk re-assignment (e.g. a wide shift-click) can be undone.
-  const applyAssignments = (next: (number | null)[]) => {
-    setAssignmentHistory((history) => [
-      ...history.slice(-(MAX_ASSIGNMENT_HISTORY - 1)),
-      assignments,
-    ]);
-    setAssignments(next);
+  // Fallback for standalone use; App passes the shared history instead.
+  const localHistory = useUndoHistory<LocalTopSnapshot>(
+    transcriptStructureKey(transcript),
+    MAX_TOP_HISTORY,
+  );
+  const undoCount = history ? history.count : localHistory.entries.length;
+  const lastHistoryEntryId = history ? history.lastEntryId : localHistory.last?.id ?? null;
+  const lastHistoryLabel = history ? history.lastLabel : localHistory.last?.label ?? null;
+  const undoLocked = history?.locked ?? false;
+
+  // Every TOP or assignment change on this page goes through here, so it can
+  // be undone. Returns the history entry id, or null if nothing changed.
+  const commitEdit = (edit: Omit<TopEdit, 'selectedTopId'>): number | null => {
+    const changesTops = (edit.tops !== undefined && !sameList(edit.tops, tops)) ||
+      (edit.topIds !== undefined && !sameList(edit.topIds, stableTopIds));
+    const changesAssignments = edit.assignments !== undefined && !sameList(edit.assignments, assignments);
+    if (!changesTops && !changesAssignments) return null;
+    const selectedTopId = stableTopIds[selectedTop] ?? null;
+    if (history) return history.commit({ ...edit, selectedTopId });
+    const entryId = localHistory.push(
+      { tops, topIds: stableTopIds, assignments, selectedTopId },
+      edit.label,
+    );
+    if (changesTops) updateTops(edit.tops ?? tops, edit.topIds ?? stableTopIds);
+    if (changesAssignments) setAssignments(edit.assignments!);
+    return entryId;
   };
 
-  // A snapshot taken before the TOP list or the transcript lines changed could
-  // reference TOPs or lines that no longer exist. This also covers changes made
-  // outside this step, such as applying a re-extracted PDF agenda.
-  const topIdentity = stableTopIds.join('\u0000');
-  useEffect(() => {
-    setAssignmentHistory([]);
-  }, [topIdentity, transcript.length]);
+  const applyAssignments = (next: (number | null)[], label = 'Zuordnung ändern') =>
+    commitEdit({ label, assignments: next });
 
-  const undoLastAssignmentChange = () => {
-    const previous = assignmentHistory[assignmentHistory.length - 1];
-    if (!previous) return;
-    setAssignmentHistory((history) => history.slice(0, -1));
-    if (previous.length === assignments.length) {
-      setAssignments(previous);
+  const undoLocally = (): TopUndoResult | null => {
+    const entry = localHistory.pop();
+    if (!entry) return null;
+    const previous = entry.snapshot;
+    if (!sameList(previous.tops, tops) || !sameList(previous.topIds, stableTopIds)) {
+      updateTops(previous.tops, previous.topIds);
     }
+    if (previous.assignments.length === assignments.length) setAssignments(previous.assignments);
+    return { label: entry.label, topIds: previous.topIds, selectedTopId: previous.selectedTopId };
+  };
+
+  const undoLastChange = (focusRestoredTop = false) => {
+    if (undoLocked) {
+      setLiveAnnouncement(UNDO_LOCKED_HINT);
+      return;
+    }
+    const result = history ? history.undo() : undoLocally();
+    if (!result) return;
+    const restoredIndex = result.selectedTopId ? result.topIds.indexOf(result.selectedTopId) : -1;
+    if (restoredIndex >= 0) {
+      setSelectedTop(restoredIndex);
+      if (focusRestoredTop) pendingTopFocusRef.current = result.selectedTopId;
+    }
+    setLiveAnnouncement(`Rückgängig gemacht: ${result.label}`);
   };
 
   // Re-registered on every render so the handler always sees current state.
@@ -168,11 +217,28 @@ export default function AssignmentStep({
         return;
       }
       event.preventDefault();
-      undoLastAssignmentChange();
+      undoLastChange();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   });
+
+  // Keeps keyboard focus on a TOP after it was moved or restored; React may
+  // re-insert its button elsewhere in the list.
+  useEffect(() => {
+    const topId = pendingTopFocusRef.current;
+    if (!topId) return;
+    const button = topButtonRefs.current.get(topId);
+    if (button) {
+      pendingTopFocusRef.current = null;
+      button.focus();
+    }
+  });
+
+  const dismissDeleteNotice = useCallback(() => setDeleteNotice(null), []);
+  // The notice disappears as soon as anything else changes the history.
+  const visibleDeleteNotice =
+    deleteNotice && deleteNotice.entryId === lastHistoryEntryId ? deleteNotice : null;
 
   const handleLineClick = (lineIndex: number, event: Pick<MouseEvent, 'detail' | 'shiftKey'>) => {
     if (editingLine === lineIndex) {
@@ -220,7 +286,7 @@ export default function AssignmentStep({
         newAssignments[i] = segment.top_index;
       }
     }
-    applyAssignments(newAssignments);
+    applyAssignments(newAssignments, 'Vorschlag übernehmen');
     setSelectedTop(segment.top_index);
     setSelectedLineIndex(segment.start_index);
   };
@@ -252,24 +318,24 @@ export default function AssignmentStep({
           }
         }
       });
-    applyAssignments(newAssignments);
+    applyAssignments(newAssignments, 'Sichere Vorschläge übernehmen');
   };
 
   const applyAllSuggestions = () => {
     if (!agendaDetection || agendaDetectionStale) {
       return;
     }
-    applyAssignments(agendaDetection.assignments);
+    applyAssignments(agendaDetection.assignments, 'Alle Vorschläge übernehmen');
   };
 
   const renameSelectedTop = () => {
     const title = topTitleDraft.trim();
-    if (!title || !tops[selectedTop]) {
+    if (!title || !tops[selectedTop] || title === tops[selectedTop]) {
       return;
     }
     const newTops = [...tops];
     newTops[selectedTop] = title;
-    updateTops(newTops);
+    commitEdit({ label: 'TOP umbenennen', tops: newTops, topIds: stableTopIds });
   };
 
   const addTop = () => {
@@ -282,8 +348,7 @@ export default function AssignmentStep({
       if (assignment === null) return null;
       return assignment >= insertionIndex ? assignment + 1 : assignment;
     });
-    updateTops(newTops, newTopIds);
-    setAssignments(newAssignments);
+    commitEdit({ label: 'TOP hinzufügen', tops: newTops, topIds: newTopIds, assignments: newAssignments });
     setSelectedTop(insertionIndex);
     setTopTitleDraft(newTops[insertionIndex] ?? '');
   };
@@ -292,6 +357,7 @@ export default function AssignmentStep({
     if (tops.length === 0) {
       return;
     }
+    const deletedTitle = tops[selectedTop] || 'Unbenannter Tagesordnungspunkt';
     const newTops = tops.filter((_, index) => index !== selectedTop);
     const newTopIds = stableTopIds.filter((_, index) => index !== selectedTop);
     const newAssignments = assignments.map((assignment) => {
@@ -299,9 +365,11 @@ export default function AssignmentStep({
       if (assignment === selectedTop) return null;
       return assignment > selectedTop ? assignment - 1 : assignment;
     });
-    updateTops(newTops, newTopIds);
-    setAssignments(newAssignments);
+    const entryId = commitEdit({ label: 'TOP löschen', tops: newTops, topIds: newTopIds, assignments: newAssignments });
     setSelectedTop(Math.max(0, Math.min(selectedTop, newTops.length - 1)));
+    if (entryId !== null) {
+      setDeleteNotice({ id: entryId, entryId, message: `TOP ‚${deletedTitle}‘ gelöscht` });
+    }
   };
 
   const mergeSelectedTopWithPrevious = () => {
@@ -319,9 +387,50 @@ export default function AssignmentStep({
       if (assignment === selectedTop) return selectedTop - 1;
       return assignment > selectedTop ? assignment - 1 : assignment;
     });
-    updateTops(newTops, newTopIds);
-    setAssignments(newAssignments);
+    commitEdit({ label: 'TOPs zusammenlegen', tops: newTops, topIds: newTopIds, assignments: newAssignments });
     setSelectedTop(selectedTop - 1);
+  };
+
+  // Moves a TOP within the agenda. Titles and their numbering stay as they
+  // are; summaries follow the TOP id, assignments are renumbered.
+  const moveTop = (from: number, to: number, focusMovedTop: boolean) => {
+    if (from === to || from < 0 || from >= tops.length || to < 0 || to >= tops.length) {
+      return;
+    }
+    const next = moveTopInList(tops, stableTopIds, assignments, from, to);
+    commitEdit({ label: 'TOP verschieben', ...next });
+    setSelectedTop(to);
+    if (focusMovedTop) pendingTopFocusRef.current = stableTopIds[from] ?? null;
+    setLiveAnnouncement(
+      `TOP ‚${tops[from] || 'Unbenannter Tagesordnungspunkt'}‘ an Position ${to + 1} von ${tops.length} verschoben.`,
+    );
+  };
+
+  const handleTopListKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+    const item = (event.target as HTMLElement).closest<HTMLElement>('[data-top-index]');
+    const from = item ? Number(item.dataset.topIndex) : selectedTop;
+    event.preventDefault();
+    moveTop(from, event.key === 'ArrowUp' ? from - 1 : from + 1, true);
+  };
+
+  const endTopDrag = () => {
+    setDragTopIndex(null);
+    setDropTopIndex(null);
+  };
+
+  const handleTopDragOver = (event: DragEvent<HTMLDivElement>, index: number) => {
+    if (dragTopIndex === null) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    if (dropTopIndex !== index) setDropTopIndex(index);
+  };
+
+  const handleTopDrop = (event: DragEvent<HTMLDivElement>, index: number) => {
+    if (dragTopIndex === null) return;
+    event.preventDefault();
+    moveTop(dragTopIndex, index, true);
+    endTopDrag();
   };
 
   const getCurrentSegmentBounds = (lineIndex: number): { start: number; end: number } => {
@@ -606,6 +715,10 @@ export default function AssignmentStep({
       ? 'Prüfen'
       : 'Bereit';
 
+  // Keys follow the TOP identity so a moved TOP keeps its element (and focus).
+  const topKeys = stableTopIds.map((topId, index) =>
+    stableTopIds.indexOf(topId) === index ? topId : `${topId}#${index}`);
+
   const getDetectionSegmentForLine = (lineIndex: number) =>
     !agendaDetectionStale ? agendaDetection?.segments.find(
       (segment) => lineIndex >= segment.start_index && lineIndex <= segment.end_index
@@ -735,15 +848,46 @@ export default function AssignmentStep({
               >
                 TOP zusammenlegen
               </button>
+              <button
+                type="button"
+                onClick={() => moveTop(selectedTop, selectedTop - 1, selectedTop - 1 <= 0)}
+                disabled={selectedTop <= 0}
+                aria-label="TOP nach oben verschieben"
+                title="TOP nach oben verschieben (Alt+↑ in der Tagesordnung)"
+                className="px-2 py-2 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+              >
+                ▲ Nach oben
+              </button>
+              <button
+                type="button"
+                onClick={() => moveTop(selectedTop, selectedTop + 1, selectedTop + 1 >= tops.length - 1)}
+                disabled={selectedTop >= tops.length - 1}
+                aria-label="TOP nach unten verschieben"
+                title="TOP nach unten verschieben (Alt+↓ in der Tagesordnung)"
+                className="px-2 py-2 text-sm bg-white border border-gray-300 rounded hover:bg-gray-100 disabled:opacity-50"
+              >
+                ▼ Nach unten
+              </button>
             </div>
           </div>
-          <div className="review-scroll space-y-2" tabIndex={0} role="region" aria-label="Tagesordnung">
+          <UndoNotice
+            notice={visibleDeleteNotice}
+            onUndo={() => undoLastChange(true)}
+            onExpire={dismissDeleteNotice}
+            undoDisabled={undoLocked}
+            undoDisabledHint={UNDO_LOCKED_HINT}
+          />
+          <p className="sr-only" aria-live="polite" aria-atomic="true">{liveAnnouncement}</p>
+          <div className="review-scroll space-y-2" tabIndex={0} role="region" aria-label="Tagesordnung"
+            onKeyDown={handleTopListKeyDown}>
             <details className="mb-3 text-sm text-gray-700">
               <summary className="cursor-pointer font-medium">Hilfe zur Zuordnung</summary>
               <div className="mt-2 space-y-2">
                 <p>TOP auswählen, dann eine Transkriptzeile anklicken oder mit Enter bzw. Leertaste zuordnen. Erneutes Aktivieren hebt die Zuordnung auf. Mit Umschalt wird der Bereich seit der letzten Zeile zugeordnet.</p>
                 <p>Segmentaktionen gelten für zusammenhängende Zeilen desselben TOPs. Zeilenumbrüche beim Bearbeiten teilen eine Zeile auf.</p>
                 <p>Automatische Vorschläge anhand des Transkripts prüfen: Auch innerhalb eines Segments können Themenwechsel vorkommen. Die Sammelübernahme setzt abgeschlossene Modellprüfungen voraus.</p>
+                <p>TOPs lassen sich per Drag &amp; Drop, mit ▲/▼ oder mit Alt+↑/↓ in der Tagesordnung verschieben. Titel und Nummern bleiben dabei unverändert.</p>
+                <p>„Rückgängig“ bzw. Strg+Z nimmt die letzte Änderung an TOPs oder Zuordnungen zurück, auch Löschen und übernommene Vorschläge. Der Verlauf gilt bis zum Neuladen der Seite.</p>
               </div>
             </details>
             {tops.length === 0 ? (
@@ -753,32 +897,68 @@ export default function AssignmentStep({
             ) : tops.map((top, index) => {
               const color = getColor(index);
               const isSelected = selectedTop === index;
+              const topId = stableTopIds[index]!;
+              const isDropTarget = dropTopIndex === index && dragTopIndex !== null && dragTopIndex !== index;
               return (
-                <button
-                  key={index}
-                  onClick={() => setSelectedTop(index)}
-                  aria-current={isSelected ? 'true' : undefined}
-                  className={`w-full text-left px-3 py-3 rounded-lg border-2 transition-all ${
-                    isSelected
-                      ? `${color.bg} ${color.border} ${color.text}`
-                      : 'border-transparent hover:bg-gray-50'
+                <div
+                  key={topKeys[index]}
+                  onDragOver={(event) => handleTopDragOver(event, index)}
+                  onDrop={(event) => handleTopDrop(event, index)}
+                  className={`flex items-stretch gap-1 rounded-lg ${dragTopIndex === index ? 'opacity-50' : ''} ${
+                    isDropTarget ? 'ring-2 ring-blue-500 ring-offset-1' : ''
                   }`}
                 >
-                  <div className="flex items-start gap-2">
-                    <div className={`w-3 h-3 rounded-full mt-1 ${color.dot}`} />
-                    <div className="flex-1 min-w-0">
-                      <div
-                        className="font-medium text-sm break-words"
-                        title={top || 'Unbenannter Tagesordnungspunkt'}
-                      >
-                        {top || 'Unbenannter Tagesordnungspunkt'}
-                      </div>
-                      <div className="text-xs text-gray-500 mt-1">
-                        {counts[index]} Zeilen
+                  {/* A separate handle: Firefox does not start drags on buttons. */}
+                  <span
+                    draggable
+                    data-testid={`top-drag-handle-${index}`}
+                    aria-hidden="true"
+                    title="Zum Verschieben ziehen"
+                    onDragStart={(event) => {
+                      setDragTopIndex(index);
+                      if (event.dataTransfer) {
+                        event.dataTransfer.effectAllowed = 'move';
+                        // Firefox only starts a drag with data attached.
+                        event.dataTransfer.setData('text/plain', top);
+                      }
+                    }}
+                    onDragEnd={endTopDrag}
+                    className="flex cursor-grab select-none items-center px-1 text-gray-400 hover:text-gray-700 active:cursor-grabbing"
+                  >
+                    ⠿
+                  </span>
+                  <button
+                    type="button"
+                    ref={(element) => {
+                      if (element) topButtonRefs.current.set(topId, element);
+                      else topButtonRefs.current.delete(topId);
+                    }}
+                    data-top-index={index}
+                    onClick={() => setSelectedTop(index)}
+                    aria-current={isSelected ? 'true' : undefined}
+                    aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+                    className={`min-w-0 flex-1 text-left px-3 py-3 rounded-lg border-2 transition-all ${
+                      isSelected
+                        ? `${color.bg} ${color.border} ${color.text}`
+                        : 'border-transparent hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <div className={`w-3 h-3 rounded-full mt-1 ${color.dot}`} />
+                      <div className="flex-1 min-w-0">
+                        <div
+                          className="font-medium text-sm break-words"
+                          title={top || 'Unbenannter Tagesordnungspunkt'}
+                        >
+                          {top || 'Unbenannter Tagesordnungspunkt'}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          {counts[index]} Zeilen
+                        </div>
                       </div>
                     </div>
-                  </div>
-                </button>
+                  </button>
+                </div>
               );
             })}
           </div>
@@ -790,13 +970,21 @@ export default function AssignmentStep({
             <span className="mr-1 font-medium text-gray-900">Korrektur</span>
             <button
               type="button"
-              onClick={undoLastAssignmentChange}
-              disabled={assignmentHistory.length === 0}
-              title="Letzte TOP-Zuordnungsänderung rückgängig machen (Strg+Z)"
+              onClick={() => undoLastChange()}
+              disabled={undoCount === 0 || undoLocked}
+              aria-describedby={undoLocked && undoCount > 0 ? 'undo-locked-hint' : undefined}
+              title={undoLocked
+                ? UNDO_LOCKED_HINT
+                : lastHistoryLabel
+                  ? `Rückgängig: ${lastHistoryLabel} (Strg+Z)`
+                  : 'Letzte Änderung an TOPs oder Zuordnungen rückgängig machen (Strg+Z)'}
               className="px-3 py-1.5 bg-amber-100 border border-amber-300 text-amber-900 rounded hover:bg-amber-200 disabled:opacity-50 disabled:bg-white disabled:text-gray-400 disabled:border-gray-300"
             >
-              Rückgängig{assignmentHistory.length > 0 ? ` (${assignmentHistory.length})` : ''}
+              Rückgängig{undoCount > 0 ? ` (${undoCount})` : ''}
             </button>
+            {undoLocked && undoCount > 0 && (
+              <span id="undo-locked-hint" className="text-xs text-amber-900">{UNDO_LOCKED_HINT}</span>
+            )}
             <span className="w-px h-6 bg-gray-300 mx-1" />
             <span className="text-gray-700">
               {selectedLineIndex === null

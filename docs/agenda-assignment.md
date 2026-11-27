@@ -47,6 +47,29 @@ und `/api/agenda-detection/jobs`; ihr Status über `/api/model-jobs/{job_id}`.
 Die frühere Browsergrenze für synchrone Modellanfragen gilt nicht für die
 Zuordnung vollständiger Sitzungen über diese Hintergrundverarbeitung.
 
+## Manuelle Bearbeitung und Rückgängig
+
+Auf der Zuordnungsseite lassen sich TOPs umbenennen, hinzufügen, löschen,
+zusammenlegen und verschieben. Verschieben geht per Drag & Drop am Griff ⠿,
+mit ▲/▼ im Bearbeitungsfeld oder mit Alt+↑/↓, solange die Tagesordnung den
+Fokus hat. Titel und Nummern bleiben dabei unverändert; Zuordnungen werden
+umnummeriert, Zusammenfassungen folgen der TOP-ID.
+
+„Rückgängig“ und Strg+Z nehmen Änderungen schrittweise zurück (bis zu 20):
+Zeilen- und Segmentzuordnungen, übernommene Zuordnungsvorschläge, alle
+TOP-Änderungen und die Übernahme einer PDF-Tagesordnung. Jeder Schritt stellt
+TOPs, IDs und Zuordnungen vollständig wieder her. Ein gelöschter TOP erhält
+seine Zusammenfassung, ihren Status und die Prüfhinweise zurück. Für TOPs, die
+noch existieren, bleibt die aktuelle Zusammenfassung erhalten. Nach dem Löschen
+erscheint zusätzlich für etwa zehn Sekunden der Hinweis „TOP ‚…‘ gelöscht –
+Rückgängig“.
+
+Der Verlauf liegt nur im Browserspeicher. Er übersteht den Wechsel zum
+Protokollentwurf und zurück, aber kein Neuladen und keinen Sitzungswechsel.
+Teilen oder Verbinden von Transkriptzeilen beendet den bisherigen Verlauf, weil
+sich die Zeilenpositionen ändern. Während Zusammenfassungen erzeugt werden, ist
+Rückgängig gesperrt.
+
 ## Modellablauf
 
 ### Optionale feste TOP-Reihenfolge

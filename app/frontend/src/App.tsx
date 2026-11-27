@@ -53,6 +53,16 @@ import type {
 } from "./types";
 
 import { agendaSource, proposalsAreValid } from "./agendaProposals";
+import type { TopEdit, TopHistoryControl, TopUndoResult } from "./types";
+import { useUndoHistory } from "./hooks/useUndoHistory";
+import {
+  MAX_TOP_HISTORY,
+  restoreTopKeyedValues,
+  stableTopIds,
+  transcriptStructureKey,
+  type PdfAgendaSnapshot,
+  type TopEditSnapshot,
+} from "./topHistory";
 
 // LocalStorage key for LLM settings
 const LLM_SETTINGS_KEY = "llm-settings";
@@ -430,6 +440,11 @@ export default function App() {
   const [summaries, setSummaries] = useState<Record<number, string>>({});
   const [summaryReviews, setSummaryReviews] = useState<Record<number, SummaryReview>>({});
   const [summaryStates, setSummaryStates] = useState<Record<number, SummaryState>>({});
+  // Shared undo history of the assignment page. It lives here so it survives
+  // switching between steps, but only in memory: a reload discards it.
+  const transcriptStructure = useMemo(() => transcriptStructureKey(transcript), [transcript]);
+  const topHistory = useUndoHistory<TopEditSnapshot>(transcriptStructure, MAX_TOP_HISTORY);
+  const clearTopHistory = topHistory.clear;
   const [exportMetadata, setExportMetadata] = useState<ExportMetadata>(DEFAULT_EXPORT_METADATA);
   const [isStartingSummaryJob, setIsStartingSummaryJob] = useState(false);
   const [summaryJob, setSummaryJob] = useState<SummaryJob | null>(null);
@@ -635,6 +650,7 @@ export default function App() {
     setEnforceTopOrder(session.enforce_top_order ?? false);
     const nextSessionId = session.session_id ?? null;
     const nextRevision = session.revision ?? null;
+    if (nextSessionId !== activeSessionIdRef.current) clearTopHistory();
     setSessionId(nextSessionId);
     activeSessionIdRef.current = nextSessionId;
     setSessionRevision(nextRevision);
@@ -706,7 +722,7 @@ export default function App() {
     setProcessingError(null);
     setProcessingStatus("");
     setProcessingProgress(0);
-  }, []);
+  }, [clearTopHistory]);
 
   const applyPipelineResult = useCallback((result: PipelineResultResponse) => {
     if (result.pipeline.retained_result_available) {
@@ -842,6 +858,7 @@ export default function App() {
     setProcessingProgress(0);
     setSessionMessage(null);
     setRestoreCandidate(null);
+    clearTopHistory();
     lastSavedPayloadRef.current = null;
     try {
       localStorage.removeItem(ACTIVE_SESSION_KEY);
@@ -850,7 +867,7 @@ export default function App() {
     } catch (e) {
       console.error("Failed to clear session draft:", e);
     }
-  }, []);
+  }, [clearTopHistory]);
 
   // Check backend availability on mount
   useEffect(() => {
@@ -1367,6 +1384,8 @@ export default function App() {
     setIsLoadingRouteSession(true);
     try {
       const restored = await loadSession(sessionId);
+      // The server state replaces local edits, so older snapshots no longer apply.
+      clearTopHistory();
       applySession(restored);
       setSessionMessage(null);
       lastSavedPayloadRef.current = serializeSessionPayload({
@@ -1676,6 +1695,56 @@ export default function App() {
     setTops(nextTops);
   };
 
+  const captureTopSnapshot = (selectedTopId: string | null, pdfAgenda?: PdfAgendaSnapshot): TopEditSnapshot => ({
+    tops, topIds, assignments, summaries, summaryReviews, summaryStates, selectedTopId,
+    ...(pdfAgenda ? { pdfAgenda } : {}),
+  });
+
+  // Records the current state in the undo history, then applies the edit.
+  const commitTopEdit = (edit: TopEdit): number => {
+    const entryId = topHistory.push(captureTopSnapshot(edit.selectedTopId ?? null), edit.label);
+    if (edit.tops) handleTopsChange(edit.tops, edit.topIds ?? stableTopIds(edit.tops, topIds));
+    if (edit.assignments) setAssignments(edit.assignments);
+    return entryId;
+  };
+
+  const undoTopEdit = (): TopUndoResult | null => {
+    // A running job writes summaries by TOP id; restoring older ones would race it.
+    if (isGeneratingSummary) return null;
+    const entry = topHistory.pop();
+    if (!entry) return null;
+    const snapshot = entry.snapshot;
+    const snapshotIds = stableTopIds(snapshot.tops, snapshot.topIds);
+    const currentIds = stableTopIds(tops, topIds);
+    setSummaries(restoreTopKeyedValues(snapshot.summaries, snapshotIds, summaries, currentIds));
+    setSummaryReviews(restoreTopKeyedValues(snapshot.summaryReviews, snapshotIds, summaryReviews, currentIds));
+    setSummaryStates(restoreTopKeyedValues(snapshot.summaryStates, snapshotIds, summaryStates, currentIds));
+    setTops(snapshot.tops);
+    setTopIds(snapshot.topIds);
+    setAssignments(snapshot.assignments);
+    if (snapshot.pdfAgenda) {
+      const pdfAgenda = snapshot.pdfAgenda;
+      setPdfCandidate(pdfAgenda.candidate);
+      setPdfExtraction(pdfAgenda.pdfExtraction);
+      setPdfSourceJobId(pdfAgenda.pdfSourceJobId);
+      setHasPdfSource(pdfAgenda.hasPdfSource);
+      setAgendaProposals(pdfAgenda.agendaProposals);
+      setSkippedAssignment(pdfAgenda.skippedAssignment);
+      setSkipAgendaDetection(pdfAgenda.skipAgendaDetection);
+      setPipelineNotice(null);
+    }
+    return { label: entry.label, topIds: snapshotIds, selectedTopId: snapshot.selectedTopId };
+  };
+
+  const topHistoryControl: TopHistoryControl = {
+    count: topHistory.entries.length,
+    lastEntryId: topHistory.last?.id ?? null,
+    lastLabel: topHistory.last?.label ?? null,
+    locked: isGeneratingSummary,
+    commit: commitTopEdit,
+    undo: undoTopEdit,
+  };
+
   const handleApplyPdfCandidate = () => {
     if (!pdfCandidate || !pdfResultReviewable(pdfCandidate, processingMode) || isDetectingAgenda || isExtractingPdf) return;
     const sourceId = pdfCandidate.document?.job_id ?? pdfJob?.job_id;
@@ -1683,6 +1752,10 @@ export default function App() {
       setPdfExtractionError('Die neue PDF-Auswertung hat keine gespeicherte Quellenreferenz. Bitte erneut extrahieren.');
       return;
     }
+    topHistory.push(captureTopSnapshot(null, {
+      candidate: pdfCandidate, pdfExtraction, pdfSourceJobId, hasPdfSource, agendaProposals,
+      skippedAssignment, skipAgendaDetection,
+    }), 'PDF-Tagesordnung übernehmen');
     const nextTops = pdfCandidate.tops;
     const nextIds = nextTops.map(title => {
       const previous = tops.indexOf(title);
@@ -1917,6 +1990,7 @@ export default function App() {
         />
       ) : currentStep === 2 ? (
         <AssignmentStep
+          history={topHistoryControl}
           onNext={handleStep2Next}
           onBack={handleStep2Back}
           tops={validTops}

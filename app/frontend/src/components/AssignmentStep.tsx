@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, type MouseEvent } from 'react';
+import { useState, useRef, useEffect, useMemo, type MouseEvent } from 'react';
 import type {
   AssignmentSuggestionSegment,
   AssignmentStepProps,
@@ -11,6 +11,10 @@ import PdfSources from './PdfSources';
 import { useAudioSync } from '../hooks/useAudioSync';
 import SpeakerNameEditor from './SpeakerNameEditor';
 import { mergedTiming } from '../transcriptTiming';
+import HighlightedText from './HighlightedText';
+import TranscriptSearchBar from './TranscriptSearchBar';
+import { scrollLineIntoView, useTranscriptSearch } from '../hooks/useTranscriptSearch';
+import { useHighlightMatcher } from '../highlightTerms';
 
 function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -117,6 +121,15 @@ export default function AssignmentStep({
 
   // Helper to get display name for a speaker
   const getDisplayName = (speakerId: string) => speakerNames[speakerId] || speakerId;
+
+  const highlightMatcher = useHighlightMatcher();
+  const searchableLines = useMemo(
+    () => transcript.map((line) => ({ speaker: speakerNames[line.speaker] || line.speaker, text: line.text })),
+    [transcript, speakerNames],
+  );
+  const transcriptSearch = useTranscriptSearch(searchableLines, (lineIndex) =>
+    scrollLineIntoView(transcriptContainerRef.current?.children[lineIndex] as HTMLElement | undefined),
+  );
 
   const getColor = (topIndex: number): TopColor => topColors[topIndex % topColors.length]!;
 
@@ -881,8 +894,9 @@ export default function AssignmentStep({
             </div>
           )}
 
-          <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 border-b border-gray-200 bg-gray-50">
             <h3 className="font-medium text-gray-900">Transkript</h3>
+            <TranscriptSearchBar search={transcriptSearch} className="flex-1 basis-64" />
           </div>
           <div ref={transcriptContainerRef} className="review-scroll flex-1 p-2" tabIndex={0} role="region" aria-label="Transkript">
             {transcript.map((line, index) => {
@@ -906,7 +920,10 @@ export default function AssignmentStep({
                   }`}
                 >
                   <span className="font-medium text-gray-600">
-                    {getDisplayName(line.speaker)}:
+                    <HighlightedText
+                      text={getDisplayName(line.speaker)}
+                      searchRanges={transcriptSearch.rangesFor(index, 'speaker')}
+                    />:
                   </span>{' '}
                   {editingLine === index ? (
                     <div
@@ -954,7 +971,11 @@ export default function AssignmentStep({
                           }
                         }}
                         className="rounded py-1 text-left text-gray-800"
-                      >{line.text}</button>
+                      ><HighlightedText
+                        text={line.text}
+                        boldRanges={highlightMatcher.find(line.text)}
+                        searchRanges={transcriptSearch.rangesFor(index, 'text')}
+                      /></button>
                       {detectionSegment?.uncertain && (
                         <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded bg-yellow-200 text-yellow-900 text-xs font-medium">
                           Unsicher

@@ -1,10 +1,14 @@
 import ErrorDetails from './ErrorDetails';
-import { useState, useRef, useEffect, useCallback, type ChangeEvent } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, type ChangeEvent } from 'react';
 import { exportProtocol } from '../api';
 import type { ExportFormat, ExportMetadata, StructuredSummary, SummaryStepProps, TranscriptLine } from '../types';
 import AudioPlayer from './AudioPlayer';
 import ProtocolText from './ProtocolText';
 import { useAudioSync } from '../hooks/useAudioSync';
+import HighlightedText from './HighlightedText';
+import TranscriptSearchBar from './TranscriptSearchBar';
+import { scrollLineIntoView, useTranscriptSearch } from '../hooks/useTranscriptSearch';
+import { useHighlightMatcher } from '../highlightTerms';
 
 function formatTime(seconds: number): string {
   const mins = Math.floor(seconds / 60);
@@ -270,6 +274,15 @@ export default function SummaryStep({
     : undefined;
   const selectedSummaryIndex = hasTops ? selectedTop : 0;
   const topLines = hasTops ? getTranscriptForTop(selectedTop) : transcript;
+  const highlightMatcher = useHighlightMatcher();
+  const searchableLines = useMemo(
+    () => (hasTops ? getTranscriptForTop(selectedTop) : transcript)
+      .map((line) => ({ speaker: speakerNames[line.speaker] || line.speaker, text: line.text })),
+    [getTranscriptForTop, hasTops, selectedTop, speakerNames, transcript],
+  );
+  const transcriptSearch = useTranscriptSearch(searchableLines, (lineIndex) =>
+    scrollLineIntoView(transcriptLineRefs.current[lineIndex]),
+  );
   const selectedReview = summaryReviews[selectedSummaryIndex];
   const selectedSummaryState = summaryStates[selectedSummaryIndex];
   const selectedWarnings = selectedReview?.review_warnings ?? [];
@@ -690,10 +703,11 @@ export default function SummaryStep({
               </div>
             )}
 
-            <div className="px-4 py-2 border-b border-gray-200 bg-gray-50">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-2 border-b border-gray-200 bg-gray-50">
               <h4 className="text-sm font-medium text-gray-700">
                 Originaltranskript ({topLines.length} Zeilen)
               </h4>
+              <TranscriptSearchBar search={transcriptSearch} className="flex-1 basis-56" />
             </div>
             <div ref={transcriptContainerRef} className="review-scroll flex-1 p-3 text-sm" tabIndex={0} role="region" aria-label="Originaltranskript">
               {topLines.length > 0 ? (
@@ -714,9 +728,18 @@ export default function SummaryStep({
                       }`}
                     >
                       <span className="font-medium text-gray-500">
-                        {getDisplayName(line.speaker)}:
+                        <HighlightedText
+                          text={getDisplayName(line.speaker)}
+                          searchRanges={transcriptSearch.rangesFor(index, 'speaker')}
+                        />:
                       </span>{' '}
-                      <span className="text-gray-700">{line.text}</span>
+                      <span className="text-gray-700">
+                        <HighlightedText
+                          text={line.text}
+                          boldRanges={highlightMatcher.find(line.text)}
+                          searchRanges={transcriptSearch.rangesFor(index, 'text')}
+                        />
+                      </span>
                       {audioUrl ? (
                         <button type="button" onClick={() => handleLineDoubleClick(line)} className="ml-2 rounded px-2 py-1 text-sm text-blue-700 hover:bg-blue-50" aria-label={`Audio ab ${formatTime(line.start)}`}>
                           Audio {formatTime(line.start)}

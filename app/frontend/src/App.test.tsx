@@ -411,7 +411,7 @@ describe('App pipeline flow', () => {
     window.history.replaceState(null, '', '/sessions/session-1');
     render(<App />);
     await screen.findByText(original.summaries[0]!);
-    await user.click(screen.getByRole('button', { name: 'KI-Einstellungen' }));
+    await user.click(screen.getByRole('button', { name: /^(KI-)?Einstellungen$/ }));
     fireEvent.change(screen.getByLabelText('Zusammenfassungsstil'), { target: { value: 'gemma4-custom' } });
     fireEvent.change(screen.getByLabelText('System-Prompt'), { target: { value: 'NEUER_STIL' } });
     fireEvent.keyDown(document, { key: 'Escape' });

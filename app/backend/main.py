@@ -2203,6 +2203,79 @@ def ensure_session_top_ids(
     return [str(uuid.uuid4()) for _ in tops]
 
 
+# Matches the undo history length of the editor (MAX_TOP_HISTORY).
+MAX_REMOVED_TOP_SUMMARIES = 20
+
+
+def _restorable_removed_summary(
+    removed: dict[str, Any] | None,
+    requested_summaries: dict[int, Any],
+    index: int,
+    title: str | None,
+    speaker_replacements: dict[str, str],
+) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, str]] | None:
+    """Return the last stored summary data of a TOP brought back unchanged.
+
+    An undo in the editor re-adds a removed TOP id with exactly the summary it
+    had. Then its review, sources and state are continued as if the TOP had
+    never been removed instead of being treated as a manual edit.
+    """
+    if not removed or index not in requested_summaries:
+        return None
+    summary = str(removed.get("summary") or "")
+    replacements = dict(speaker_replacements)
+    old_title = str(removed.get("title") or "")
+    if old_title and title is not None and old_title != title:
+        replacements[old_title] = title
+    requested = str(requested_summaries.get(index) or "")
+    if not summary or requested not in {summary, str(_replace_exact_labels(summary, replacements))}:
+        return None
+    return (
+        summary,
+        dict(removed.get("review") or {}),
+        dict(removed.get("state") or {}),
+        replacements,
+    )
+
+
+def _removed_top_summaries(
+    existing: dict[str, Any] | None,
+    old_top_ids: list[str],
+    present_ids: list[str],
+    old_summaries: dict[int, Any],
+    old_reviews: dict[int, Any],
+    old_states: dict[int, Any],
+) -> list[dict[str, Any]]:
+    """Remember summary data of TOPs removed by this save, newest last.
+
+    Internal bookkeeping only; it is never part of a session response or export.
+    """
+    present = set(present_ids)
+    entries = [
+        entry for entry in (existing or {}).get("removed_top_summaries") or []
+        if isinstance(entry, dict) and entry.get("top_id") not in present
+    ]
+    old_titles = list((existing or {}).get("tops") or [])
+    for old_index, top_id in enumerate(old_top_ids):
+        if top_id in present:
+            continue
+        summary = old_summaries.get(old_index) or ""
+        review = old_reviews.get(old_index) or {}
+        summary_state = old_states.get(old_index) or {}
+        if not (summary or review or summary_state):
+            continue
+        entries = [entry for entry in entries if entry.get("top_id") != top_id]
+        entries.append({
+            "top_id": top_id,
+            "title": str(old_titles[old_index]) if old_index < len(old_titles) else None,
+            "summary": str(summary),
+            "review": deepcopy(review),
+            "state": deepcopy(summary_state),
+            "removed_at": time.time(),
+        })
+    return entries[-MAX_REMOVED_TOP_SUMMARIES:]
+
+
 def reconcile_session_summaries(
     existing: dict[str, Any] | None,
     incoming: dict[str, Any],
@@ -2253,6 +2326,11 @@ def reconcile_session_summaries(
     if existing and (existing.get("skipped_assignment") or not existing.get("tops")):
         old_top_ids = [f"whole-session:{existing.get('session_id', '')}"]
     old_index_by_id = {top_id: index for index, top_id in enumerate(old_top_ids)}
+    removed_by_id = {
+        entry.get("top_id"): entry
+        for entry in (existing or {}).get("removed_top_summaries") or []
+        if isinstance(entry, dict)
+    }
     old_summaries = dict((existing or {}).get("summaries") or {})
     old_reviews = dict((existing or {}).get("summary_reviews") or {})
     old_states = dict((existing or {}).get("summary_states") or {})
@@ -2286,6 +2364,10 @@ def reconcile_session_summaries(
             new_title = str(tops[index]) if index < len(tops) else old_title
             if old_title != new_title:
                 local_replacements[old_title] = new_title
+        if old_index is None and (restored := _restorable_removed_summary(
+                removed_by_id.get(top_id), requested_summaries, index,
+                str(tops[index]) if index < len(tops) else None, speaker_replacements)):
+            old_summary, old_review, previous_state, local_replacements = restored
 
         # The frontend mirrors deterministic label replacements immediately so
         # the UI does not flicker while autosaving. Treat that exact result as
@@ -2446,6 +2528,9 @@ def reconcile_session_summaries(
     state["summaries"] = next_summaries
     state["summary_reviews"] = next_reviews
     state["summary_states"] = next_states
+    state["removed_top_summaries"] = _removed_top_summaries(
+        existing, old_top_ids, effective_ids, old_summaries, old_reviews, old_states,
+    )
     return state
 
 

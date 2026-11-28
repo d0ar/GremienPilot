@@ -362,17 +362,18 @@ describe('AssignmentStep', () => {
     expect(setAssignments).toHaveBeenLastCalledWith([0, 1]);
   });
 
-  it('forgets the undo history when the TOP list is replaced', () => {
-    const props = { ...defaultProps, assignments: [0, 1], setAssignments: vi.fn(), topIds: ['a', 'b'] };
+  it('keeps the undo history when the TOP list changes, because snapshots include the TOPs', async () => {
+    const user = userEvent.setup();
+    const props = { ...defaultProps, assignments: [0, 1], setAssignments: vi.fn(), setTops: vi.fn(), topIds: ['a', 'b'] };
     const { rerender } = render(<AssignmentStep {...props} />);
 
     fireEvent.click(screen.getByText('Hallo zusammen'));
-    expect(screen.getByRole('button', { name: /^rückgängig/i })).toBeEnabled();
+    // E.g. a TOP list changed outside the history of this step.
+    rerender(<AssignmentStep {...props} assignments={[null, 1]} tops={['Neu', 'Haushalt']} topIds={['c', 'b']} />);
 
-    // E.g. a re-extracted PDF agenda applied from outside this step.
-    rerender(<AssignmentStep {...props} tops={['Neu', 'Haushalt']} topIds={['c', 'b']} />);
-
-    expect(screen.getByRole('button', { name: /^rückgängig/i })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: /^rückgängig \(1\)/i }));
+    expect(props.setTops).toHaveBeenLastCalledWith(['Begruessung', 'Haushalt']);
+    expect(props.setAssignments).toHaveBeenLastCalledWith([0, 1]);
   });
 
   it('renames, adds, deletes and merges TOPs while preserving manual correction', async () => {

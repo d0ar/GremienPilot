@@ -524,7 +524,38 @@ export interface ProcessingStepProps {
   onCancel?: () => void;
 }
 
+/** A change on the assignment page that is recorded in the undo history. */
+export interface TopEdit {
+  label: string;
+  tops?: string[];
+  topIds?: string[];
+  assignments?: (number | null)[];
+  /** TOP selected before the change; it is selected again on undo. */
+  selectedTopId?: string | null;
+}
+
+export interface TopUndoResult {
+  label: string;
+  /** Stable TOP ids after the undo, by position. */
+  topIds: string[];
+  selectedTopId: string | null;
+}
+
+/** Shared undo history for TOPs and assignments, owned by App. */
+export interface TopHistoryControl {
+  count: number;
+  lastEntryId: number | null;
+  lastLabel: string | null;
+  /** Undo is blocked, e.g. while summaries are being generated. */
+  locked: boolean;
+  /** Records the current state and applies the edit; returns the entry id. */
+  commit: (edit: TopEdit) => number;
+  undo: () => TopUndoResult | null;
+}
+
 export interface AssignmentStepProps {
+  /** Without it the step keeps a local history of TOPs and assignments. */
+  history?: TopHistoryControl;
   agendaJob?: import('./api').ModelJob | null;
   pdfJob?: import('./api').ModelJob | null;
   isExtractingPdf?: boolean;

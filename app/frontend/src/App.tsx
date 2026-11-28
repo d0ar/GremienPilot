@@ -1996,6 +1996,7 @@ export default function App() {
           speakerNames={speakerNames}
           exportMetadata={exportMetadata}
           setExportMetadata={setExportMetadata}
+          summarySettings={llmSettings}
         />
       )}
     </Layout>

@@ -721,6 +721,7 @@ Kompatibilität und unterstützten Verweisen: [TOP-Nummerierung](docs/top-nummer
 | `/api/speaker-profiles/{profile_id}` | PUT/DELETE | Profil ändern oder archivieren |
 | `/api/speaker-profiles/{profile_id}/embeddings` | DELETE | gespeicherte Embeddings löschen |
 | `/api/sessions/{session_id}/speaker-observations` | GET | Sprecherprofil-Vorschläge abrufen |
+| `/api/settings/highlight-terms` | GET/PUT | Begriffsliste für Hervorhebungen im Transkript (siehe `docs/transkriptsuche-hervorhebungen.md`) |
 
 Der Pipeline-Start trennt `summary_system_prompt`, `agenda_system_prompt` und
 `pdf_system_prompt` (Formularfelder oder JSON-Feld `options`). Das bisherige

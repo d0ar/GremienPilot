@@ -14,6 +14,19 @@ from typing import Any
 DEFAULT_DB_PATH = Path(os.environ.get("PERSISTENCE_DB_PATH", "data/sessions.sqlite3"))
 
 
+class SettingConflictError(RuntimeError):
+    """Raised when a client saves a global setting based on an old revision."""
+
+    def __init__(self, key: str, expected_revision: int, current: dict[str, Any]):
+        self.key = key
+        self.expected_revision = expected_revision
+        self.current = current
+        super().__init__(
+            f"Setting {key} changed from revision "
+            f"{expected_revision} to {current['revision']}"
+        )
+
+
 class SessionConflictError(RuntimeError):
     """Raised when a client tries to overwrite a newer session revision."""
 
@@ -389,6 +402,17 @@ def init_db(db_path: Path | None = None) -> None:
                 ADD COLUMN metadata_json TEXT
                 """
             )
+        # Global settings shared by all workstations, e.g. highlight terms.
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                updated_at REAL NOT NULL
+            )
+            """
+        )
 
 
 def _to_json(value: Any) -> str | None:
@@ -2079,3 +2103,60 @@ def delete_session(
             path for path in upload_paths if _resolved(path) not in referenced
         )
     }
+
+
+def load_setting(key: str, db_path: Path | None = None) -> dict[str, Any]:
+    """Load a global setting; a missing setting has revision 0 and value None."""
+    with connect(db_path) as db:
+        row = db.execute(
+            "SELECT value_json, revision, updated_at FROM app_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+    if row is None:
+        return {"value": None, "revision": 0, "updated_at": None}
+    return {
+        "value": _from_json(row["value_json"]),
+        "revision": row["revision"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def save_setting(
+    key: str,
+    value: Any,
+    *,
+    expected_revision: int,
+    db_path: Path | None = None,
+) -> dict[str, Any]:
+    """Store a global setting if nobody else saved it since expected_revision."""
+    now = time.time()
+    with connect(db_path) as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            "SELECT value_json, revision, updated_at FROM app_settings WHERE key = ?",
+            (key,),
+        ).fetchone()
+        current_revision = row["revision"] if row is not None else 0
+        if current_revision != expected_revision:
+            raise SettingConflictError(
+                key,
+                expected_revision,
+                {
+                    "value": _from_json(row["value_json"]) if row is not None else None,
+                    "revision": current_revision,
+                    "updated_at": row["updated_at"] if row is not None else None,
+                },
+            )
+        revision = current_revision + 1
+        db.execute(
+            """
+            INSERT INTO app_settings (key, value_json, revision, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value_json = excluded.value_json,
+                revision = excluded.revision,
+                updated_at = excluded.updated_at
+            """,
+            (key, json.dumps(value, ensure_ascii=False), revision, now),
+        )
+    return {"value": value, "revision": revision, "updated_at": now}

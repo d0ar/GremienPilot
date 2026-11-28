@@ -368,7 +368,7 @@ describe('App pipeline flow', () => {
     await uploadAndStart();
     await waitFor(() => expect(finish).toBeDefined());
     const submitted = { ...vi.mocked(startPipeline).mock.calls[0]![1] };
-    await user.click(screen.getByRole('button', { name: 'KI-Einstellungen' }));
+    await user.click(screen.getByRole('button', { name: 'Einstellungen' }));
     fireEvent.change(screen.getByLabelText('Zusammenfassungsstil'), { target: { value: 'gemma4-custom' } });
     fireEvent.change(screen.getByLabelText('System-Prompt'), { target: { value: 'NEXT_JOB_STYLE' } });
     fireEvent.keyDown(document, { key: 'Escape' });

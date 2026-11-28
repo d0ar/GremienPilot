@@ -6,6 +6,7 @@ import { DEFAULT_CUSTOM_SUMMARY_PROMPT } from './LLMSettingsPanel';
 import { SUMMARY_STYLE_LABELS, customPromptChanged, effectiveSummaryStyle, generatedSummaryStyle } from '../summaryProvenance';
 import AudioPlayer from './AudioPlayer';
 import ProtocolText from './ProtocolText';
+import { ResizableSummaryPanes, ResizableWorkspace } from './ResizablePanes';
 import { useAudioSync } from '../hooks/useAudioSync';
 import HighlightedText from './HighlightedText';
 import TranscriptSearchBar from './TranscriptSearchBar';
@@ -437,7 +438,7 @@ export default function SummaryStep({
       </div>
 
       {/* Main Layout */}
-      <div className="review-workspace">
+      <ResizableWorkspace page="protocol" className="review-workspace">
         {/* TOPs Sidebar */}
         <div className="review-pane flex flex-col bg-white rounded-lg border border-gray-200 p-3">
           <h3 className="font-medium text-gray-900 mb-4">Tagesordnung</h3>
@@ -508,7 +509,7 @@ export default function SummaryStep({
         </div>
 
         {/* Summary Content */}
-        <div className="summary-panes review-pane grid gap-3 lg:grid-rows-[minmax(0,3fr)_minmax(0,2fr)]">
+        <ResizableSummaryPanes className="summary-panes review-pane grid gap-3">
           {/* Summary Box */}
           <div className="review-pane bg-white rounded-lg border border-gray-200 flex flex-col">
             <div className="shrink-0 rounded-t-lg px-4 py-3 border-b border-gray-200 bg-gray-50 flex flex-wrap items-center justify-between gap-2">
@@ -789,8 +790,8 @@ export default function SummaryStep({
               )}
             </div>
           </div>
-        </div>
-      </div>
+        </ResizableSummaryPanes>
+      </ResizableWorkspace>
 
       {regenerationCandidate !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal="true" aria-labelledby="regeneration-title">

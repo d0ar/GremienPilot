@@ -11,6 +11,7 @@ import AudioPlayer from './AudioPlayer';
 import ModelJobStatus from './ModelJobStatus';
 import PdfSources from './PdfSources';
 import UndoNotice, { type UndoNoticeContent } from './UndoNotice';
+import { ResizableWorkspace } from './ResizablePanes';
 import { useAudioSync } from '../hooks/useAudioSync';
 import { useUndoHistory } from '../hooks/useUndoHistory';
 import { MAX_TOP_HISTORY, UNDO_LOCKED_HINT, moveTopInList, transcriptStructureKey } from '../topHistory';
@@ -814,7 +815,7 @@ export default function AssignmentStep({
       </div>
 
       {/* Main Layout */}
-      <div id="assignment-workspace" tabIndex={-1} className="review-workspace scroll-mt-4">
+      <ResizableWorkspace page="assignment" id="assignment-workspace" tabIndex={-1} className="review-workspace scroll-mt-4">
         {/* TOPs Sidebar */}
         <div className="review-pane flex flex-col bg-white rounded-lg border border-gray-200 p-3">
           <h3 className="font-medium text-gray-900 mb-4">Tagesordnung</h3>
@@ -1191,7 +1192,7 @@ export default function AssignmentStep({
             })}
           </div>
         </div>
-      </div>
+      </ResizableWorkspace>
 
       {/* Actions */}
       <div className="flex flex-wrap justify-between gap-2">
